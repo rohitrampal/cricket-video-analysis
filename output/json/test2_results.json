@@ -1,0 +1,39 @@
+{
+  "video": "test2.mp4",
+  "batsman": "Batsman",
+  "facing": "left",
+  "shots": [
+    {
+      "shot_id": 1,
+      "frame_idx": 30,
+      "timestamp_sec": 1.0,
+      "bat_vector": {
+        "dx": -84.43,
+        "dy": -60.94
+      },
+      "raw_angle_deg": 144.18,
+      "peak_motion": 11.53,
+      "wrist_samples": 17,
+      "angle_deg": 35.82,
+      "field_zone": "Long On",
+      "shot_length": 1.0,
+      "shot_type": "Flick / Glance",
+      "runs": 0,
+      "color": "#4FC3F7"
+    }
+  ],
+  "summary": {
+    "total_shots": 1,
+    "total_runs": 0,
+    "avg_angle_deg": 35.82,
+    "leg_side_pct": 100.0,
+    "off_side_pct": 0.0,
+    "zone_breakdown": {
+      "Long On": 1
+    },
+    "shot_type_breakdown": {
+      "Flick / Glance": 1
+    }
+  },
+  "wagon_wheel": "/Users/apple/Desktop/cricket_analysis/output/wagon_wheels/test2_wagon_wheel.png"
+}

@@ -1,0 +1,271 @@
+{
+  "video": "test1.mp4",
+  "batsman": "Batsman",
+  "facing": "right",
+  "shots": [
+    {
+      "shot_id": 1,
+      "frame_idx": 15,
+      "timestamp_sec": 0.501,
+      "bat_vector": {
+        "dx": -29.2,
+        "dy": 11.4
+      },
+      "raw_angle_deg": -158.67,
+      "angle_deg": -158.67,
+      "field_zone": "Third Man",
+      "shot_length": 0.522,
+      "shot_type": "Sweep / Ramp",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 2,
+      "frame_idx": 60,
+      "timestamp_sec": 2.002,
+      "bat_vector": {
+        "dx": -12.26,
+        "dy": 5.3
+      },
+      "raw_angle_deg": -156.62,
+      "angle_deg": -156.62,
+      "field_zone": "Third Man",
+      "shot_length": 0.35,
+      "shot_type": "Defensive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 3,
+      "frame_idx": 90,
+      "timestamp_sec": 3.003,
+      "bat_vector": {
+        "dx": -7.18,
+        "dy": -35.24
+      },
+      "raw_angle_deg": 101.52,
+      "angle_deg": 101.52,
+      "field_zone": "Square Leg",
+      "shot_length": 0.599,
+      "shot_type": "Pull / Hook",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 4,
+      "frame_idx": 125,
+      "timestamp_sec": 4.171,
+      "bat_vector": {
+        "dx": 26.9,
+        "dy": 42.96
+      },
+      "raw_angle_deg": -57.95,
+      "angle_deg": -57.95,
+      "field_zone": "Cover",
+      "shot_length": 0.845,
+      "shot_type": "Cover Drive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 5,
+      "frame_idx": 155,
+      "timestamp_sec": 5.172,
+      "bat_vector": {
+        "dx": 13.19,
+        "dy": 4.74
+      },
+      "raw_angle_deg": -19.77,
+      "angle_deg": -19.77,
+      "field_zone": "Long Off",
+      "shot_length": 0.35,
+      "shot_type": "Defensive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 6,
+      "frame_idx": 185,
+      "timestamp_sec": 6.173,
+      "bat_vector": {
+        "dx": 9.53,
+        "dy": 27.32
+      },
+      "raw_angle_deg": -70.77,
+      "angle_deg": -70.77,
+      "field_zone": "Cover",
+      "shot_length": 0.482,
+      "shot_type": "Cut",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 7,
+      "frame_idx": 230,
+      "timestamp_sec": 7.674,
+      "bat_vector": {
+        "dx": -3.6,
+        "dy": -12.2
+      },
+      "raw_angle_deg": 106.44,
+      "angle_deg": 106.44,
+      "field_zone": "Square Leg",
+      "shot_length": 0.35,
+      "shot_type": "Defensive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 8,
+      "frame_idx": 260,
+      "timestamp_sec": 8.675,
+      "bat_vector": {
+        "dx": -16.72,
+        "dy": -55.05
+      },
+      "raw_angle_deg": 106.89,
+      "angle_deg": 106.89,
+      "field_zone": "Square Leg",
+      "shot_length": 0.959,
+      "shot_type": "Pull / Hook",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 9,
+      "frame_idx": 290,
+      "timestamp_sec": 9.677,
+      "bat_vector": {
+        "dx": -13.88,
+        "dy": -1.24
+      },
+      "raw_angle_deg": 174.89,
+      "angle_deg": 174.89,
+      "field_zone": "Fine Leg",
+      "shot_length": 0.35,
+      "shot_type": "Defensive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 10,
+      "frame_idx": 320,
+      "timestamp_sec": 10.678,
+      "bat_vector": {
+        "dx": 13.11,
+        "dy": -20.68
+      },
+      "raw_angle_deg": 57.63,
+      "angle_deg": 57.63,
+      "field_zone": "Mid Wicket",
+      "shot_length": 0.408,
+      "shot_type": "Flick / Glance",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 11,
+      "frame_idx": 350,
+      "timestamp_sec": 11.679,
+      "bat_vector": {
+        "dx": 24.48,
+        "dy": 24.82
+      },
+      "raw_angle_deg": -45.4,
+      "angle_deg": -45.4,
+      "field_zone": "Cover",
+      "shot_length": 0.581,
+      "shot_type": "Cover Drive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 12,
+      "frame_idx": 410,
+      "timestamp_sec": 13.681,
+      "bat_vector": {
+        "dx": 4.85,
+        "dy": 16.07
+      },
+      "raw_angle_deg": -73.21,
+      "angle_deg": -73.21,
+      "field_zone": "Cover",
+      "shot_length": 0.35,
+      "shot_type": "Defensive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 13,
+      "frame_idx": 460,
+      "timestamp_sec": 15.349,
+      "bat_vector": {
+        "dx": -14.96,
+        "dy": -10.63
+      },
+      "raw_angle_deg": 144.6,
+      "angle_deg": 144.6,
+      "field_zone": "Fine Leg",
+      "shot_length": 0.35,
+      "shot_type": "Defensive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 14,
+      "frame_idx": 490,
+      "timestamp_sec": 16.35,
+      "bat_vector": {
+        "dx": -5.81,
+        "dy": -50.86
+      },
+      "raw_angle_deg": 96.52,
+      "angle_deg": 96.52,
+      "field_zone": "Square Leg",
+      "shot_length": 0.853,
+      "shot_type": "Pull / Hook",
+      "runs": 0,
+      "color": "#4FC3F7"
+    },
+    {
+      "shot_id": 15,
+      "frame_idx": 520,
+      "timestamp_sec": 17.351,
+      "bat_vector": {
+        "dx": 3.93,
+        "dy": 11.47
+      },
+      "raw_angle_deg": -71.09,
+      "angle_deg": -71.09,
+      "field_zone": "Cover",
+      "shot_length": 0.35,
+      "shot_type": "Defensive",
+      "runs": 0,
+      "color": "#4FC3F7"
+    }
+  ],
+  "summary": {
+    "total_shots": 15,
+    "total_runs": 0,
+    "avg_angle_deg": 9.0,
+    "leg_side_pct": 46.7,
+    "off_side_pct": 53.3,
+    "zone_breakdown": {
+      "Third Man": 2,
+      "Square Leg": 4,
+      "Cover": 5,
+      "Long Off": 1,
+      "Fine Leg": 2,
+      "Mid Wicket": 1
+    },
+    "shot_type_breakdown": {
+      "Sweep / Ramp": 1,
+      "Defensive": 7,
+      "Pull / Hook": 3,
+      "Cover Drive": 2,
+      "Cut": 1,
+      "Flick / Glance": 1
+    }
+  },
+  "wagon_wheel": "/Users/apple/Desktop/cricket_analysis/output/wagon_wheels/test1_wagon_wheel.png"
+}
