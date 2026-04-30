@@ -18,8 +18,8 @@ DEVICE          = "cpu"
 BATCH_MODE      = "sequential"   # change to "concurrent" on server
 
 # ─── Frame extraction ─────────────────────────────────────
-FRAME_SAMPLE_RATE   = 5          # extract every Nth frame (CPU friendly)
-MIN_SHOT_GAP_FRAMES = 30         # minimum frames between two shots
+FRAME_SAMPLE_RATE   = 2          # extract every Nth frame (higher temporal fidelity)
+MIN_SHOT_GAP_FRAMES = 12         # minimum frames between two shots
 
 # ─── Detection thresholds ─────────────────────────────────
 POSE_CONFIDENCE     = 0.6

@@ -87,6 +87,8 @@ class MotionShotDetector:
     DEDUP_WINDOW_SEC    = 0.5
     DEDUP_ANGLE_DIFF_MAX = 25.0
     VERTICAL_REJECT_MAGNITUDE = 0.12
+    MIN_ARM_ANGLE_CHANGE = 15.0   # minimum arm-angle change to confirm shot
+    MIN_WRIST_TRAVEL_PX = 15.0    # reject tiny wrist-travel windows
 
     def __init__(self, debug_metrics: bool = False):
         self.pose_detector   = PoseDetector()
@@ -105,6 +107,7 @@ class MotionShotDetector:
         # Arm positions during shot window
         self.wrist_positions = []     # body-relative (x, y) during active window
         self.wrist_frame_indices = []
+        self.arm_angles = []
         self.shot_arm_side = None
         self.max_wrist_velocity = 0.0
         self.impact_sample_idx = -1
@@ -177,22 +180,17 @@ class MotionShotDetector:
             return None, None
 
         wrist = self._point_xy(keypoints[f"{side}_wrist"])
-        elbow = self._point_xy(keypoints[f"{side}_elbow"])
         shoulder = self._point_xy(keypoints[f"{side}_shoulder"])
         hip_center = self._hip_center(keypoints)
 
         wrist_rel = wrist - hip_center
-        elbow_rel = elbow - hip_center
         shoulder_rel = shoulder - hip_center
 
-        elbow_vis = keypoints[f"{side}_elbow"]["visibility"]
         shoulder_vis = keypoints[f"{side}_shoulder"]["visibility"]
-        if elbow_vis >= self.MIN_VISIBILITY:
-            bat_vec = wrist_rel - elbow_rel
-        elif shoulder_vis >= self.MIN_VISIBILITY:
-            bat_vec = wrist_rel - shoulder_rel
-        else:
+        if shoulder_vis < self.MIN_VISIBILITY:
             return None, None
+        # Use shoulder-based arm vector for more stable shot motion cue.
+        bat_vec = wrist_rel - shoulder_rel
         return wrist_rel, bat_vec
 
     def _smooth_trajectory(self, positions: np.ndarray) -> np.ndarray:
@@ -399,6 +397,7 @@ class MotionShotDetector:
                     self.peak_frame_data  = frame_data
                     self.wrist_positions  = []
                     self.wrist_frame_indices = []
+                    self.arm_angles = []
                     self.shot_arm_side = None
                     self.max_wrist_velocity = 0.0
                     self.impact_sample_idx = -1
@@ -416,9 +415,10 @@ class MotionShotDetector:
             if self.shot_arm_side is None:
                 self.shot_arm_side = self._best_visible_arm(keypoints)
             if self.shot_arm_side:
-                wrist_rel, _ = self._extract_bat_sample(keypoints, self.shot_arm_side)
+                wrist_rel, arm_vec = self._extract_bat_sample(keypoints, self.shot_arm_side)
                 if wrist_rel is not None:
                     curr = np.array([float(wrist_rel[0]), float(wrist_rel[1])], dtype=np.float32)
+                    curr_angle = float(np.degrees(np.arctan2(-arm_vec[1], arm_vec[0])))
                     if self.wrist_positions:
                         prev = np.array(self.wrist_positions[-1], dtype=np.float32)
                         jump = float(np.linalg.norm(curr - prev))
@@ -427,15 +427,16 @@ class MotionShotDetector:
                     if curr is not None:
                         self.wrist_positions.append((float(curr[0]), float(curr[1])))
                         self.wrist_frame_indices.append(frame_idx)
+                        self.arm_angles.append(curr_angle)
                         curr_idx = len(self.wrist_positions) - 1
-                        if curr_idx > 0:
+                        if curr_idx > 0 and len(self.arm_angles) > 1:
                             prev_idx = self.wrist_frame_indices[curr_idx - 1]
                             curr_frame = self.wrist_frame_indices[curr_idx]
                             frame_delta = max(1, curr_frame - prev_idx)
-                            prev_pt = np.array(self.wrist_positions[curr_idx - 1], dtype=np.float32)
-                            velocity = float(np.linalg.norm(curr - prev_pt) / frame_delta)
-                            if velocity > self.max_wrist_velocity:
-                                self.max_wrist_velocity = velocity
+                            prev_angle = self.arm_angles[-2]
+                            angle_delta = abs(self._wrap_angle_deg(curr_angle - prev_angle)) / frame_delta
+                            if angle_delta > self.max_wrist_velocity:
+                                self.max_wrist_velocity = angle_delta
                                 self.impact_sample_idx = curr_idx
 
         # Detect end of shot (motion drops back to quiet)
@@ -501,10 +502,27 @@ class MotionShotDetector:
 
         positions = np.array(self.wrist_positions, dtype=np.float32)
         smooth_positions = self._smooth_trajectory(positions)
+        wrist_travel = float(np.linalg.norm(smooth_positions[-1] - smooth_positions[0]))
+        if wrist_travel < self.MIN_WRIST_TRAVEL_PX:
+            log.debug("Shot rejected due to low wrist travel (%.2f px)", wrist_travel)
+            return None
 
         frame_indices = np.array(self.wrist_frame_indices, dtype=np.int32)
-        impact_idx, velocities = self._detect_impact_idx(smooth_positions, frame_indices)
+        if len(self.arm_angles) >= 2:
+            angle_deltas = [
+                abs(self._wrap_angle_deg(self.arm_angles[i] - self.arm_angles[i - 1]))
+                for i in range(1, len(self.arm_angles))
+            ]
+            max_angle_change = float(max(angle_deltas)) if angle_deltas else 0.0
+            impact_idx = int(np.argmax(angle_deltas)) + 1 if angle_deltas else 0
+            velocities = np.array(angle_deltas, dtype=np.float32)
+        else:
+            impact_idx, velocities = self._detect_impact_idx(smooth_positions, frame_indices)
+            max_angle_change = 0.0
         self.impact_sample_idx = impact_idx
+        if max_angle_change < self.MIN_ARM_ANGLE_CHANGE:
+            log.debug("Shot rejected due to low arm angle change (%.2f deg)", max_angle_change)
+            return None
         n = len(smooth_positions)
         start_idx, end_idx = self._adaptive_window(n, self.impact_sample_idx)
         start = smooth_positions[start_idx]
@@ -517,13 +535,14 @@ class MotionShotDetector:
         if total_dist < self.MIN_VECTOR_MAGNITUDE:
             log.debug(f"Shot window closed but wrist barely moved ({total_dist:.3f} rel-units)")
             return None
-        h, w = self.peak_frame_data["frame"].shape[:2] if self.peak_frame_data else (1, 1)
-        frame_scale = max(1.0, float(np.sqrt(w * h)))
-        max_wrist_velocity_norm = float(self.max_wrist_velocity / frame_scale)
-        dynamic_impact_velocity_norm = float(self.dynamic_min_impact_velocity / frame_scale)
-        if max_wrist_velocity_norm < dynamic_impact_velocity_norm:
-            log.debug("Shot rejected due to low impact velocity (%.3f)", self.max_wrist_velocity)
-            return None
+        if len(self.arm_angles) < 2:
+            h, w = self.peak_frame_data["frame"].shape[:2] if self.peak_frame_data else (1, 1)
+            frame_scale = max(1.0, float(np.sqrt(w * h)))
+            max_wrist_velocity_norm = float(self.max_wrist_velocity / frame_scale)
+            dynamic_impact_velocity_norm = float(self.dynamic_min_impact_velocity / frame_scale)
+            if max_wrist_velocity_norm < dynamic_impact_velocity_norm:
+                log.debug("Shot rejected due to low impact velocity (%.3f)", self.max_wrist_velocity)
+                return None
 
         # Reject mostly vertical movement to reduce false shot directions.
         vertical_ratio = float(abs(dy) / max(1e-6, abs(dx)))
