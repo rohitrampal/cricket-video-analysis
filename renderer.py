@@ -15,18 +15,17 @@ ZONE_LABELS = [
     ( 140, 1.13, "Fine Leg"),
     ( 100, 1.13, "Square Leg"),
     (  60, 1.13, "Mid Wicket"),
-    (  25, 1.13, "Long On"),
+    (  20, 1.13, "Long On"),
     (   0, 1.16, "Straight"),
-    ( -25, 1.13, "Long Off"),
+    ( -20, 1.13, "Long Off"),
     ( -60, 1.13, "Cover"),
     (-100, 1.13, "Point"),
     (-140, 1.13, "Third Man"),
 ]
 
 def cricket_to_xy(angle_deg, radius=1.0):
-    # Cricket convention used across analyzer/config:
-    # 0° = straight (top of field), +ve = leg side, -ve = off side.
-    math_rad = np.radians(90 - angle_deg)
+    # Angle mapping for wagon wheel rendering.
+    math_rad = np.radians(90 + angle_deg)
     return radius * np.cos(math_rad), radius * np.sin(math_rad)
 
 def draw_3d_field(ax, fig):
