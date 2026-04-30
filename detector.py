@@ -89,6 +89,8 @@ class MotionShotDetector:
     VERTICAL_REJECT_MAGNITUDE = 0.12
     MIN_ARM_ANGLE_CHANGE = 15.0   # minimum arm-angle change to confirm shot
     MIN_WRIST_TRAVEL_PX = 15.0    # reject tiny wrist-travel windows
+    IMPACT_FORWARD_FRAMES = 4      # use post-impact direction (N in [3,5])
+    UNSTABLE_ANGLE_ABS_DEG = 110.0
 
     def __init__(self, debug_metrics: bool = False):
         self.pose_detector   = PoseDetector()
@@ -263,6 +265,19 @@ class MotionShotDetector:
         mean_sin = float(np.mean(np.sin(angle_values)))
         mean_cos = float(np.mean(np.cos(angle_values)))
         return self._wrap_angle_deg(float(np.degrees(np.arctan2(mean_sin, mean_cos))))
+
+    def _median_recent_vector(self, smooth_positions: np.ndarray, impact_idx: int) -> np.ndarray:
+        """Median local motion vector around impact for unstable-angle fallback."""
+        n = len(smooth_positions)
+        diffs = []
+        for i in range(max(1, impact_idx - 2), min(n, impact_idx + 3)):
+            d = smooth_positions[i] - smooth_positions[i - 1]
+            if float(np.linalg.norm(d)) > 1e-6:
+                diffs.append(d)
+        if not diffs:
+            return np.array([0.0, 0.0], dtype=np.float32)
+        arr = np.array(diffs, dtype=np.float32)
+        return np.median(arr, axis=0)
 
     def _update_calibration(self, frame_idx: int, motion_score: float, keypoints: dict | None):
         def trimmed_mean(values: list[float], trim_ratio: float = 0.15) -> float:
@@ -524,7 +539,10 @@ class MotionShotDetector:
             log.debug("Shot rejected due to low arm angle change (%.2f deg)", max_angle_change)
             return None
         n = len(smooth_positions)
-        start_idx, end_idx = self._adaptive_window(n, self.impact_sample_idx)
+        start_idx = int(np.clip(self.impact_sample_idx, 0, n - 1))
+        end_idx = int(np.clip(self.impact_sample_idx + self.IMPACT_FORWARD_FRAMES, 0, n - 1))
+        if end_idx <= start_idx:
+            end_idx = min(n - 1, start_idx + 1)
         start = smooth_positions[start_idx]
         end = smooth_positions[end_idx]
         vec = end - start
@@ -550,8 +568,18 @@ class MotionShotDetector:
             log.debug("Shot rejected due to dominant vertical motion")
             return None
 
-        unit_vec = vec / total_dist
-        raw_angle = self._stable_angle_from_impact(smooth_positions, self.impact_sample_idx)
+        unit_vec = vec / max(1e-6, total_dist)
+        raw_angle = float(np.degrees(np.arctan2(-unit_vec[1], unit_vec[0])))
+        raw_angle = self._wrap_angle_deg(raw_angle)
+
+        # Fallback for unstable/high-elevation style directions.
+        if abs(raw_angle) > self.UNSTABLE_ANGLE_ABS_DEG:
+            med_vec = self._median_recent_vector(smooth_positions, self.impact_sample_idx)
+            med_mag = float(np.linalg.norm(med_vec))
+            if med_mag > 1e-6:
+                med_unit = med_vec / med_mag
+                raw_angle = float(np.degrees(np.arctan2(-med_unit[1], med_unit[0])))
+                raw_angle = self._wrap_angle_deg(raw_angle)
 
         # Multi-factor confidence: magnitude + peak sharpness + trajectory smoothness.
         magnitude_score = min(1.0, total_dist / 0.35)
@@ -603,6 +631,15 @@ class MotionShotDetector:
 
         velocity_peak = float(np.max(velocities)) if len(velocities) > 0 else 0.0
         velocity_variance = float(np.var(velocities)) if len(velocities) > 1 else 0.0
+
+        # Lightweight aerial correction: when high-length shots have sign mismatch
+        # between angle and post-impact lateral motion, trust post-impact direction.
+        shot_length_proxy = float(np.clip(total_dist / 60.0, 0.35, 1.0))
+        if shot_length_proxy > 0.75:
+            lateral_dx = float(end[0] - start[0])
+            if (raw_angle > 0.0 and lateral_dx < 0.0) or (raw_angle < 0.0 and lateral_dx > 0.0):
+                raw_angle = -raw_angle
+                raw_angle = self._wrap_angle_deg(raw_angle)
 
         self.shots_detected  += 1
         self.last_shot_frame  = end_frame_idx
