@@ -6,11 +6,9 @@ log = logging.getLogger(__name__)
 
 
 def normalize_angle(raw_angle_deg: float, batsman_facing: str = "right") -> float:
-    if batsman_facing == "right":
-        angle = raw_angle_deg
-    else:
-        angle = 180 - raw_angle_deg
-    angle = (angle + 180) % 360 - 180
+    facing = (batsman_facing or "right").strip().lower()
+    angle = raw_angle_deg if facing == "right" else -raw_angle_deg
+    angle = (angle + 180.0) % 360.0 - 180.0
     return round(angle, 2)
 
 

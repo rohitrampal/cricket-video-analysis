@@ -92,6 +92,9 @@ def process_video(video_path: str,
         enriched = analyze_shot(raw, runs=runs,
                                 batsman_facing=batsman_facing)
         analyzed_shots.append(enriched)
+        confidence = float(enriched.get("confidence_score", 0.0))
+        print(f"   {enriched['shot_id']} | {enriched['angle_deg']:.1f} | "
+              f"{enriched['field_zone']} | {confidence:.3f}")
         print(f"   Shot {enriched['shot_id']:>2} | "
               f"{enriched['field_zone']:<12} | "
               f"{enriched['angle_deg']:>7.1f}° | "

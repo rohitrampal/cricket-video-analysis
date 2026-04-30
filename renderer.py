@@ -24,6 +24,8 @@ ZONE_LABELS = [
 ]
 
 def cricket_to_xy(angle_deg, radius=1.0):
+    # Cricket convention used across analyzer/config:
+    # 0° = straight (top of field), +ve = leg side, -ve = off side.
     math_rad = np.radians(90 - angle_deg)
     return radius * np.cos(math_rad), radius * np.sin(math_rad)
 
