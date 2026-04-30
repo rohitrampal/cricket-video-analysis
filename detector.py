@@ -70,19 +70,20 @@ class MotionShotDetector:
     """
 
     # ── Tuning ────────────────────────────────────────────
-    MOTION_THRESHOLD    = 0.015  # normalized active-pixel ratio
+    MOTION_THRESHOLD    = 0.010  # normalized active-pixel ratio
     MOTION_BINARY_TH    = 25     # binary threshold for frame diff mask
     PEAK_HOLD_FRAMES    = 8      # frames around peak to average wrist vector
     MIN_GAP_FRAMES      = 45     # minimum frames between two shots
     END_OF_SHOT_QUIET   = 12     # consecutive quiet frames = shot ended
     MIN_VISIBILITY      = 0.3
-    MIN_VECTOR_MAGNITUDE = 0.03  # in body-relative coordinates
+    MIN_VECTOR_MAGNITUDE = 0.01  # in body-relative coordinates
     MAX_POSE_JUMP_PX    = 100.0  # reject sudden wrist jumps
     VERTICAL_MOTION_RATIO_MAX = 1.8  # reject mostly-vertical vectors
+    ENABLE_VERTICAL_FILTER = False   # disabled to prioritize recall
     CALIBRATION_FRAMES  = 90
     MID_CALIBRATION_START = 180
     MID_CALIBRATION_FRAMES = 90
-    MIN_CONFIDENCE_SCORE = 0.35
+    MIN_CONFIDENCE_SCORE = 0.20
     DEDUP_WINDOW_SEC    = 0.5
     DEDUP_ANGLE_DIFF_MAX = 25.0
     VERTICAL_REJECT_MAGNITUDE = 0.12
@@ -306,7 +307,7 @@ class MotionShotDetector:
         if (not self.calibration_done) and len(self.calibration_motion_scores) >= self.CALIBRATION_FRAMES:
             mean_motion = trimmed_mean(self.calibration_motion_scores)
             mean_vel = trimmed_mean(self.calibration_wrist_velocities)
-            early_motion_th = float(np.clip(mean_motion * 2.2, 0.008, 0.06))
+            early_motion_th = float(np.clip(mean_motion * 2.2 * 0.6, 0.0025, 0.06))
             early_vel_th = float(max(0.0, mean_vel * 2.0))
             self.dynamic_motion_threshold = early_motion_th
             self.dynamic_min_impact_velocity = early_vel_th
@@ -319,7 +320,7 @@ class MotionShotDetector:
         if (not self.mid_calibration_done) and len(self.mid_calibration_motion_scores) >= self.MID_CALIBRATION_FRAMES:
             mid_motion = trimmed_mean(self.mid_calibration_motion_scores)
             mid_vel = trimmed_mean(self.mid_calibration_wrist_velocities)
-            mid_motion_th = float(np.clip(mid_motion * 2.2, 0.008, 0.06))
+            mid_motion_th = float(np.clip(mid_motion * 2.2 * 0.6, 0.0025, 0.06))
             mid_vel_th = float(max(0.0, mid_vel * 2.0))
             if self.calibration_done:
                 self.dynamic_motion_threshold = 0.6 * self.dynamic_motion_threshold + 0.4 * mid_motion_th
@@ -369,6 +370,14 @@ class MotionShotDetector:
         motion = self._motion_score(frame)
         keypoints = self.pose_detector.detect(frame)
         self._update_calibration(frame_idx, motion, keypoints)
+        log.debug(
+            "frame=%s motion=%.5f threshold=%.5f in_window=%s quiet=%s",
+            frame_idx,
+            motion,
+            self.dynamic_motion_threshold,
+            self.in_shot_window,
+            self.quiet_count,
+        )
 
         # Emit pending shot once dedup window elapsed.
         if self.pending_shot is not None:
@@ -451,8 +460,44 @@ class MotionShotDetector:
         Compute bat vector from wrist trajectory during the window.
         """
         if len(self.wrist_positions) < 3:
-            log.debug("Shot window closed but not enough wrist data")
-            return None
+            # Fallback to motion-only shot so real shots are not fully missed.
+            peak_fd = self.peak_frame_data
+            if not peak_fd:
+                log.debug("Shot window closed but not enough wrist data")
+                return None
+            self.shots_detected += 1
+            self.last_shot_frame = end_frame_idx
+            peak_frame_idx = peak_fd["frame_idx"]
+            peak_ts = peak_fd["timestamp_sec"]
+            fallback_conf = max(self.MIN_CONFIDENCE_SCORE, 0.22)
+            shot_data = {
+                "shot_id": self.shots_detected,
+                "frame_idx": peak_frame_idx,
+                "timestamp_sec": peak_ts,
+                "keypoints": {},
+                "bat_vector": {"dx": 0.0, "dy": 0.0},
+                "raw_angle_deg": 0.0,
+                "peak_motion": round(self.peak_motion, 2),
+                "wrist_samples": len(self.wrist_positions),
+                "confidence_score": round(fallback_conf, 3),
+            }
+            if self.debug_metrics:
+                shot_data["debug"] = {
+                    "velocity_peak": 0.0,
+                    "velocity_variance": 0.0,
+                    "vector_magnitude": 0.0,
+                    "vertical_ratio": 0.0,
+                    "confidence_score": round(fallback_conf, 4),
+                    "angle_stability_score": 0.0,
+                    "confidence_gate": round(self.MIN_CONFIDENCE_SCORE, 4),
+                }
+            log.info(
+                "Fallback motion-only shot emitted | frame=%s ts=%.3f peak_motion=%.4f",
+                peak_frame_idx,
+                peak_ts,
+                self.peak_motion,
+            )
+            return shot_data
 
         positions = np.array(self.wrist_positions, dtype=np.float32)
         smooth_positions = self._smooth_trajectory(positions)
@@ -482,7 +527,7 @@ class MotionShotDetector:
 
         # Reject mostly vertical movement to reduce false shot directions.
         vertical_ratio = float(abs(dy) / max(1e-6, abs(dx)))
-        if vertical_ratio > self.VERTICAL_MOTION_RATIO_MAX and total_dist < self.VERTICAL_REJECT_MAGNITUDE:
+        if self.ENABLE_VERTICAL_FILTER and vertical_ratio > self.VERTICAL_MOTION_RATIO_MAX and total_dist < self.VERTICAL_REJECT_MAGNITUDE:
             log.debug("Shot rejected due to dominant vertical motion")
             return None
 

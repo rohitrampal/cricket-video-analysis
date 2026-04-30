@@ -123,13 +123,13 @@ def draw_wagon_wheel(shots, video_name, summary,
     leg_pct     = summary.get("leg_side_pct", 0)
     off_pct     = summary.get("off_side_pct", 0)
 
-    fig.text(0.5, 0.985, batsman_name,
-             color="white", fontsize=17, fontweight="bold",
-             ha="center", va="top",
-             path_effects=[pe.withStroke(linewidth=3, foreground="#333")])
-    fig.text(0.5, 0.952,
+    fig.text(0.5, 0.97, batsman_name,
+             color="#ffffff", fontsize=17, fontweight="bold",
+             ha="center", va="top", zorder=25,
+             path_effects=[pe.withStroke(linewidth=3, foreground="#222222")])
+    fig.text(0.5, 0.94,
              f"Innings Analysis  ·  {total_shots} Deliveries  ·  {total_runs} Runs",
-             color="#aaaaaa", fontsize=9, ha="center", va="top")
+             color="#cccccc", fontsize=9, ha="center", va="top", zorder=24)
 
     stats = [("LEG SIDE",f"{leg_pct}%","#4FC3F7"),
              ("OFF SIDE", f"{off_pct}%","#FF8A65"),
@@ -138,14 +138,14 @@ def draw_wagon_wheel(shots, video_name, summary,
     for i,(label,val,col) in enumerate(stats):
         px = 0.12 + i*0.25
         fig.patches.append(mpatches.FancyBboxPatch(
-            (px-0.09,0.908),0.18,0.034,
+            (px-0.09,0.88),0.18,0.034,
             boxstyle="round,pad=0.005",
             facecolor="#1a1a1a", edgecolor=col,
-            linewidth=1.0, transform=fig.transFigure, zorder=20))
-        fig.text(px, 0.934, val,   color=col,     fontsize=12,
-                 fontweight="bold", ha="center", va="top")
-        fig.text(px, 0.916, label, color="#777777", fontsize=6.5,
-                 ha="center", va="top")
+            linewidth=1.0, transform=fig.transFigure, zorder=10))
+        fig.text(px, 0.906, val,   color=col,     fontsize=12,
+                 fontweight="bold", ha="center", va="top", zorder=22)
+        fig.text(px, 0.888, label, color="#cccccc", fontsize=6.5,
+                 ha="center", va="top", zorder=21)
 
     legend_items = [
         mpatches.Patch(facecolor=SHOT_COLORS[c], edgecolor="#555",
