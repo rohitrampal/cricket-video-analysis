@@ -213,6 +213,13 @@ class MotionShotDetector:
     def _wrap_angle_deg(angle: float) -> float:
         return ((angle + 180.0) % 360.0) - 180.0
 
+    def _vector_to_angle_deg(self, vec: np.ndarray) -> float:
+        """Convert image-space vector to cricket angle with Y-axis correction."""
+        dx = float(vec[0])
+        dy = -float(vec[1])  # invert image Y (OpenCV top-left origin)
+        angle = float(np.degrees(np.arctan2(dy, dx)))
+        return self._wrap_angle_deg(angle)
+
     def _detect_impact_idx(self, smooth_positions: np.ndarray, frame_indices: np.ndarray) -> tuple[int, np.ndarray]:
         """Detect impact via rise-then-drop velocity pattern (not absolute max)."""
         if len(smooth_positions) < 3:
@@ -257,8 +264,7 @@ class MotionShotDetector:
             mag = float(np.linalg.norm(vec))
             if mag < 1e-6:
                 continue
-            unit = vec / mag
-            angle = float(np.degrees(np.arctan2(-unit[1], unit[0])))
+            angle = self._vector_to_angle_deg(vec)
             angle_values.append(np.deg2rad(self._wrap_angle_deg(angle)))
         if not angle_values:
             return 0.0
@@ -433,7 +439,7 @@ class MotionShotDetector:
                 wrist_rel, arm_vec = self._extract_bat_sample(keypoints, self.shot_arm_side)
                 if wrist_rel is not None:
                     curr = np.array([float(wrist_rel[0]), float(wrist_rel[1])], dtype=np.float32)
-                    curr_angle = float(np.degrees(np.arctan2(-arm_vec[1], arm_vec[0])))
+                    curr_angle = self._vector_to_angle_deg(arm_vec)
                     if self.wrist_positions:
                         prev = np.array(self.wrist_positions[-1], dtype=np.float32)
                         jump = float(np.linalg.norm(curr - prev))
@@ -568,18 +574,14 @@ class MotionShotDetector:
             log.debug("Shot rejected due to dominant vertical motion")
             return None
 
-        unit_vec = vec / max(1e-6, total_dist)
-        raw_angle = float(np.degrees(np.arctan2(-unit_vec[1], unit_vec[0])))
-        raw_angle = self._wrap_angle_deg(raw_angle)
+        raw_angle = self._vector_to_angle_deg(vec)
 
         # Fallback for unstable/high-elevation style directions.
         if abs(raw_angle) > self.UNSTABLE_ANGLE_ABS_DEG:
             med_vec = self._median_recent_vector(smooth_positions, self.impact_sample_idx)
             med_mag = float(np.linalg.norm(med_vec))
             if med_mag > 1e-6:
-                med_unit = med_vec / med_mag
-                raw_angle = float(np.degrees(np.arctan2(-med_unit[1], med_unit[0])))
-                raw_angle = self._wrap_angle_deg(raw_angle)
+                raw_angle = self._vector_to_angle_deg(med_vec)
 
         # Multi-factor confidence: magnitude + peak sharpness + trajectory smoothness.
         magnitude_score = min(1.0, total_dist / 0.35)
@@ -605,7 +607,7 @@ class MotionShotDetector:
             dmag = float(np.linalg.norm(dvec))
             if dmag < 1e-6:
                 continue
-            ang = float(np.degrees(np.arctan2(-dvec[1], dvec[0])))
+            ang = self._vector_to_angle_deg(dvec)
             local_angles.append(np.deg2rad(self._wrap_angle_deg(ang)))
         if len(local_angles) >= 2:
             mean_sin = float(np.mean(np.sin(local_angles)))
