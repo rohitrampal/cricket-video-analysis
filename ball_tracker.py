@@ -36,6 +36,7 @@ class BallTracker:
         self.expected_post_impact_points = 6
         self.mahalanobis_gate_chi2 = 25.0
         self.noise_continuity_px = 150.0
+        self.prev_output_angle: float | None = None
 
     @staticmethod
     def _point_angle(p1: tuple[float, float], p2: tuple[float, float]) -> float:
@@ -752,7 +753,7 @@ class BallTracker:
                     dir_var_norm = late_dir_var
                     vel_var_norm = late_vel_var
                     monotonic_ratio = late_mono
-        if (len(smoothed_points) >= self.min_post_impact_points) and is_valid and bool(fit.get("ok", False)):
+        if (len(smoothed_points) >= 3) and bool(fit.get("ok", False)):
             angle = float(fit["angle"])
             vec = (smoothed_screen_points[0], smoothed_screen_points[-1])
             tracked_count = len(smoothed_points)
@@ -780,6 +781,12 @@ class BallTracker:
                 conf_label = "medium"
             else:
                 conf_label = "low"
+            if abs(angle) > 175 or float(fit.get("angle_stability", 0.0)) < 0.15:
+                conf_label = "low"
+                confidence_score = min(confidence_score, 0.35)
+            if self.prev_output_angle is not None:
+                angle = 0.7 * angle + 0.3 * float(self.prev_output_angle)
+            self.prev_output_angle = float(angle)
             debug_path = ""
             if impact_frame is not None:
                 debug_path = self._save_debug_overlay(
@@ -795,7 +802,7 @@ class BallTracker:
                     video_stem=video_stem,
                 )
             log.info(
-                "Shot %s direction | ball_pts_raw=%s ball_pts_tracked=%s kalman_used=%s regression_angle=%.2f final_angle=%.2f confidence_score=%.3f source=ball",
+                "Shot %s source_type=ball_strong | ball_pts_raw=%s ball_pts_tracked=%s kalman_used=%s regression_angle=%.2f final_angle=%.2f confidence_score=%.3f",
                 shot_id,
                 raw_count,
                 tracked_count,
@@ -824,7 +831,7 @@ class BallTracker:
                 "regression_angle": round(float(fit["angle"]), 2),
                 "confidence": conf_label,
                 "confidence_score": round(confidence_score, 3),
-                "source": "ball",
+                "source": "ball_strong",
                 "ball_detections": tracked_count,
                 "ball_pts_raw": raw_count,
                 "ball_pts_tracked": tracked_count,
@@ -836,13 +843,16 @@ class BallTracker:
                 "raw_points": raw_points,
                 "filtered_points": filtered_points,
                 "debug_image": debug_path,
-                "skip_wagon_wheel": confidence_score < 0.4,
+                "skip_wagon_wheel": False,
             }
         # Weak trajectory fallback: keep approximate ball direction when >=2 points.
         if len(smoothed_screen_points) >= 2:
             p1 = smoothed_screen_points[0]
             p2 = smoothed_screen_points[-1]
             weak_angle = self._point_angle(p1, p2)
+            if self.prev_output_angle is not None:
+                weak_angle = 0.7 * weak_angle + 0.3 * float(self.prev_output_angle)
+            self.prev_output_angle = float(weak_angle)
             tracked_count = len(smoothed_points)
             raw_count = len([p for p in raw_points if p is not None])
             debug_path = ""
@@ -860,7 +870,7 @@ class BallTracker:
                     video_stem=video_stem,
                 )
             log.info(
-                "Shot %s rejection_reason=low_confidence_but_used | ball_pts_raw=%s ball_pts_tracked=%s final_angle=%.2f source=ball",
+                "Shot %s source_type=ball_weak | reason=low_confidence_but_used | ball_pts_raw=%s ball_pts_tracked=%s final_angle=%.2f",
                 shot_id,
                 raw_count,
                 tracked_count,
@@ -871,7 +881,7 @@ class BallTracker:
                 "regression_angle": round(float(fit.get("angle", weak_angle)), 2),
                 "confidence": "low",
                 "confidence_score": 0.35,
-                "source": "ball",
+                "source": "ball_weak",
                 "ball_detections": tracked_count,
                 "ball_pts_raw": raw_count,
                 "ball_pts_tracked": tracked_count,
@@ -888,6 +898,9 @@ class BallTracker:
 
         bat_angle, wrist_pt, bat_tip_pt = self._fallback_bat_angle(window_frames, refined_impact_idx)
         if bat_angle is not None:
+            if self.prev_output_angle is not None:
+                bat_angle = 0.7 * bat_angle + 0.3 * float(self.prev_output_angle)
+            self.prev_output_angle = float(bat_angle)
             tracked_count = len(smoothed_points)
             raw_count = len([p for p in raw_points if p is not None])
             debug_path = ""
@@ -905,16 +918,14 @@ class BallTracker:
                     video_stem=video_stem,
                 )
             log.info(
-                "Shot %s direction | ball_pts_raw=%s ball_pts_tracked=%s kalman_used=%s regression_angle=%s final_angle=%.2f confidence_score=%.3f source=bat",
+                "Shot %s source_type=bat | reason=insufficient_points | ball_pts_raw=%s ball_pts_tracked=%s kalman_used=%s final_angle=%.2f confidence_score=%.3f",
                 shot_id,
                 raw_count,
                 tracked_count,
                 True,
-                "nan",
                 bat_angle,
                 0.2,
             )
-            log.info("Shot %s rejection_reason=insufficient_points", shot_id)
             log.info(
                 "Shot %s trajectory | raw=%s filtered=%s",
                 shot_id,
@@ -942,17 +953,19 @@ class BallTracker:
 
         tracked_count = len(smoothed_points)
         raw_count = len([p for p in raw_points if p is not None])
+        fallback_angle = 0.0
+        if self.prev_output_angle is not None:
+            fallback_angle = 0.3 * float(self.prev_output_angle)
+        self.prev_output_angle = float(fallback_angle)
         log.info(
-            "Shot %s direction | ball_pts_raw=%s ball_pts_tracked=%s kalman_used=%s regression_angle=%s final_angle=%.2f confidence_score=%.3f source=discard",
+            "Shot %s source_type=fallback | reason=no_direction | ball_pts_raw=%s ball_pts_tracked=%s kalman_used=%s final_angle=%.2f confidence_score=%.3f",
             shot_id,
             raw_count,
             tracked_count,
             True,
-            "nan",
-            0.0,
+            fallback_angle,
             0.0,
         )
-        log.info("Shot %s rejection_reason=insufficient_points", shot_id)
         log.info(
             "Shot %s trajectory | raw=%s filtered=%s",
             shot_id,
@@ -960,10 +973,10 @@ class BallTracker:
             filtered_points,
         )
         return {
-            "angle": 0.0,
+            "angle": round(fallback_angle, 2),
             "confidence": "low",
             "confidence_score": 0.0,
-            "source": "discard",
+            "source": "fallback",
             "ball_detections": tracked_count,
             "ball_pts_raw": raw_count,
             "ball_pts_tracked": tracked_count,
@@ -975,7 +988,7 @@ class BallTracker:
             "raw_points": raw_points,
             "filtered_points": filtered_points,
             "debug_image": "",
-            "skip_wagon_wheel": True,
+            "skip_wagon_wheel": False,
         }
 
     def close(self):

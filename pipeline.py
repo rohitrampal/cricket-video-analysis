@@ -109,13 +109,13 @@ def process_video(video_path: str,
         raw["gating_rejections"] = int(direction.get("gating_rejections", 0))
         raw["ball_raw_points"] = direction.get("raw_points", [])
         raw["ball_filtered_points"] = direction.get("filtered_points", [])
-        raw["include_in_wagon_wheel"] = not bool(direction.get("skip_wagon_wheel", False))
+        raw["include_in_wagon_wheel"] = True
         raw["ball_debug_image"] = direction["debug_image"]
         print(
             f"   Shot {raw['shot_id']:>2} | impact {raw['frame_idx']:>5} | "
             f"ball_pts_raw {raw['ball_pts_raw']:>2} | ball_pts_tracked {raw['ball_pts_tracked']:>2} | "
             f"angle {raw['raw_angle_deg']:>7.1f}° | "
-            f"source {raw['direction_source']:<7} | conf {raw['direction_confidence']} ({raw['direction_confidence_score']:.2f})"
+            f"source {raw['direction_source']:<11} | conf {raw['direction_confidence']} ({raw['direction_confidence_score']:.2f})"
         )
         print(
             f"      kalman={raw['kalman_used']} | regression_angle={raw['regression_angle']} | "
@@ -133,14 +133,9 @@ def process_video(video_path: str,
         runs    = runs_map.get(raw["shot_id"], 0)
         enriched = analyze_shot(raw, runs=runs,
                                 batsman_facing=batsman_facing)
-        low_conf = float(raw.get("direction_confidence_score", 0.0)) < 0.4
-        is_bat_fallback = raw.get("direction_source") == "bat"
-        if low_conf and not is_bat_fallback:
-            enriched["field_zone"] = "Unknown"
-            enriched["shot_type"] = "Unknown"
         enriched["direction_confidence_score"] = float(raw.get("direction_confidence_score", 0.0))
         enriched["direction_source"] = raw.get("direction_source", "discard")
-        enriched["include_in_wagon_wheel"] = bool(raw.get("include_in_wagon_wheel", True)) and (is_bat_fallback or not low_conf)
+        enriched["include_in_wagon_wheel"] = True
         analyzed_shots.append(enriched)
         confidence = float(enriched.get("confidence_score", 0.0))
         print(f"   {enriched['shot_id']} | {enriched['angle_deg']:.1f} | "
@@ -163,6 +158,9 @@ def process_video(video_path: str,
     # ── Step 4: Render wagon wheel ────────────────────────
     print("\n[5/5] Rendering wagon wheel...")
     reliable_shots = [s for s in analyzed_shots if bool(s.get("include_in_wagon_wheel", True))]
+    if raw_shots and not reliable_shots and analyzed_shots:
+        reliable_shots = [analyzed_shots[-1]]
+        print("   ⚠️ No shots selected for render; forcing last detected shot.")
     summary   = summarize_innings(reliable_shots)
     wheel_path = draw_wagon_wheel(
         shots        = reliable_shots,
