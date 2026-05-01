@@ -106,16 +106,21 @@ def draw_wagon_wheel(shots, video_name, summary,
         length = min(shot.get("shot_length", 0.7), 1.0)
         color  = shot.get("color", "#4FC3F7")
         runs   = shot.get("runs", 0)
+        source = str(shot.get("direction_source", "")).lower()
+        conf_score = float(shot.get("direction_confidence_score", 1.0))
+        is_low_conf = conf_score < 0.4 or source in {"ball_weak", "bat", "fallback"}
         x, y   = cricket_to_xy(angle, length)
-        lw     = 1.6 + runs * 0.4
+        lw_base = 1.6 + runs * 0.4
+        lw = max(0.9, lw_base * 0.62) if is_low_conf else lw_base
+        line_style = "--" if is_low_conf else "-"
         ax.plot([0,x],[0,y], color="black",   lw=lw+3,   alpha=0.3,
-                solid_capstyle="round", zorder=13)
+                solid_capstyle="round", zorder=13, linestyle=line_style)
         ax.plot([0,x],[0,y], color=color,     lw=lw+2.5, alpha=0.18,
-                solid_capstyle="round", zorder=14)
+                solid_capstyle="round", zorder=14, linestyle=line_style)
         ax.plot([0,x],[0,y], color=color,     lw=lw,     alpha=0.95,
-                solid_capstyle="round", zorder=15)
+                solid_capstyle="round", zorder=15, linestyle=line_style)
         ax.plot(x, y, "o",  color=color,
-                markersize=3.5+runs*0.5, zorder=16, alpha=1.0,
+                markersize=(3.0+runs*0.35) if is_low_conf else (3.5+runs*0.5), zorder=16, alpha=0.8 if is_low_conf else 1.0,
                 path_effects=[pe.withStroke(linewidth=2, foreground="black")])
 
     total_shots = summary.get("total_shots", len(shots))

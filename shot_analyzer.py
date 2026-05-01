@@ -232,6 +232,10 @@ def analyze_shot(raw_shot: dict, runs: int = 0,
                  batsman_facing: str = "right") -> dict:
     direction_angle = raw_shot.get("ball_angle_deg", raw_shot["raw_angle_deg"])
     angle   = normalize_angle(direction_angle, batsman_facing)
+    facing = (batsman_facing or "right").strip().lower()
+    raw_sign = np.sign(float(direction_angle))
+    adj_sign = np.sign(float(angle))
+    mirror_debug_flag = bool(abs(float(direction_angle)) > 15.0 and ((facing == "left" and raw_sign == adj_sign) or (facing == "right" and raw_sign != adj_sign)))
     zone    = get_field_zone(angle)
     length  = estimate_shot_length(raw_shot["bat_vector"])
     pts_all = _post_impact_points(raw_shot)
@@ -279,6 +283,7 @@ def analyze_shot(raw_shot: dict, runs: int = 0,
     enriched = {
         **raw_shot,
         "angle_deg":   angle,
+        "mirror_debug_flag": mirror_debug_flag,
         "field_zone":  zone,
         "shot_length": length,
         "shot_type":   s_type,
@@ -308,7 +313,8 @@ def analyze_shot(raw_shot: dict, runs: int = 0,
         f"Lofted: {enriched['lofted']} | Height: {enriched['height_score']} | "
         f"a={enriched['trajectory_curvature_a']} span={enriched['trajectory_span_n']} "
         f"prom={enriched['trajectory_prominence']} resid={residual} inlier={inlier_ratio} "
-        f"window={best_name} roi_scale={enriched['roi_scale']} res_th={enriched['dynamic_residual_threshold']}"
+        f"window={best_name} roi_scale={enriched['roi_scale']} res_th={enriched['dynamic_residual_threshold']} "
+        f"mirror_debug={mirror_debug_flag}"
     )
     return enriched
 

@@ -162,6 +162,13 @@ def process_video(video_path: str,
         reliable_shots = [analyzed_shots[-1]]
         print("   ⚠️ No shots selected for render; forcing last detected shot.")
     summary   = summarize_innings(reliable_shots)
+    reliability_counts = {"ball_strong": 0, "ball_weak": 0, "bat": 0, "fallback": 0}
+    for s in analyzed_shots:
+        src = str(s.get("direction_source", "fallback"))
+        if src in reliability_counts:
+            reliability_counts[src] += 1
+        else:
+            reliability_counts["fallback"] += 1
     wheel_path = draw_wagon_wheel(
         shots        = reliable_shots,
         video_name   = video_path.name,
@@ -187,6 +194,7 @@ def process_video(video_path: str,
     print(f"\n{'='*55}")
     print(f"  ✅ Done in {elapsed}s")
     print(f"  📊 Shots:      {summary.get('total_shots', 0)}")
+    print(f"  🔎 Sources:    {reliability_counts}")
     print(f"  🏏 Zones:      {summary.get('zone_breakdown', {})}")
     print(f"  📁 JSON:       {json_path}")
     print(f"  🖼️  Wagon Wheel: {wheel_path}")

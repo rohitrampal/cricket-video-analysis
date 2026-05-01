@@ -39,6 +39,22 @@ class BallTracker:
         self.prev_output_angle: float | None = None
 
     @staticmethod
+    def _wrap_angle_diff(curr: float, prev: float) -> float:
+        return abs(((float(curr) - float(prev) + 180.0) % 360.0) - 180.0)
+
+    def _apply_angle_smoothing(self, current_angle: float, max_diff_for_smooth: float = 40.0) -> float:
+        if self.prev_output_angle is None:
+            self.prev_output_angle = float(current_angle)
+            return float(current_angle)
+        diff = self._wrap_angle_diff(current_angle, self.prev_output_angle)
+        if diff < max_diff_for_smooth:
+            out = 0.7 * float(current_angle) + 0.3 * float(self.prev_output_angle)
+        else:
+            out = float(current_angle)
+        self.prev_output_angle = float(out)
+        return out
+
+    @staticmethod
     def _point_angle(p1: tuple[float, float], p2: tuple[float, float]) -> float:
         dx = float(p2[0] - p1[0])
         dy = float(p2[1] - p1[1])  # image-space dy; inversion handled centrally
@@ -558,8 +574,8 @@ class BallTracker:
         window_frames: list[dict],
         impact_frame_idx: int,
     ) -> tuple[float | None, tuple[float, float] | None, tuple[float, float] | None]:
-        lo = impact_frame_idx - 2
-        hi = impact_frame_idx + 2
+        lo = impact_frame_idx - 1
+        hi = impact_frame_idx + 1
         sample_angles: list[float] = []
         impact_wrist = None
         impact_tip = None
@@ -784,9 +800,7 @@ class BallTracker:
             if abs(angle) > 175 or float(fit.get("angle_stability", 0.0)) < 0.15:
                 conf_label = "low"
                 confidence_score = min(confidence_score, 0.35)
-            if self.prev_output_angle is not None:
-                angle = 0.7 * angle + 0.3 * float(self.prev_output_angle)
-            self.prev_output_angle = float(angle)
+            angle = self._apply_angle_smoothing(angle, max_diff_for_smooth=40.0)
             debug_path = ""
             if impact_frame is not None:
                 debug_path = self._save_debug_overlay(
@@ -849,58 +863,58 @@ class BallTracker:
         if len(smoothed_screen_points) >= 2:
             p1 = smoothed_screen_points[0]
             p2 = smoothed_screen_points[-1]
-            weak_angle = self._point_angle(p1, p2)
-            if self.prev_output_angle is not None:
-                weak_angle = 0.7 * weak_angle + 0.3 * float(self.prev_output_angle)
-            self.prev_output_angle = float(weak_angle)
-            tracked_count = len(smoothed_points)
-            raw_count = len([p for p in raw_points if p is not None])
-            debug_path = ""
-            if impact_frame is not None:
-                debug_path = self._save_debug_overlay(
-                    impact_frame,
-                    trajectory=smoothed_screen_points,
-                    kalman_path=kalman_path,
-                    rejected_points=[tuple(r["ball_center"]) for r in rejected],
-                    regression_line=fit.get("regression_line") if bool(fit.get("ok", False)) else None,
-                    final_source="ball",
-                    final_vector=(p1, p2),
-                    shot_id=shot_id,
-                    frame_index=refined_impact_idx,
-                    video_stem=video_stem,
+            weak_mag = float(np.hypot(float(p2[0] - p1[0]), float(p2[1] - p1[1])))
+            if weak_mag < 5.0:
+                log.info("Shot %s source_type=ball_weak | reason=movement_too_small_fallback_to_bat mag=%.2f", shot_id, weak_mag)
+            else:
+                weak_angle = self._point_angle(p1, p2)
+                weak_angle = self._apply_angle_smoothing(weak_angle, max_diff_for_smooth=40.0)
+                tracked_count = len(smoothed_points)
+                raw_count = len([p for p in raw_points if p is not None])
+                debug_path = ""
+                if impact_frame is not None:
+                    debug_path = self._save_debug_overlay(
+                        impact_frame,
+                        trajectory=smoothed_screen_points,
+                        kalman_path=kalman_path,
+                        rejected_points=[tuple(r["ball_center"]) for r in rejected],
+                        regression_line=fit.get("regression_line") if bool(fit.get("ok", False)) else None,
+                        final_source="ball",
+                        final_vector=(p1, p2),
+                        shot_id=shot_id,
+                        frame_index=refined_impact_idx,
+                        video_stem=video_stem,
+                    )
+                log.info(
+                    "Shot %s source_type=ball_weak | reason=low_confidence_but_used | ball_pts_raw=%s ball_pts_tracked=%s final_angle=%.2f",
+                    shot_id,
+                    raw_count,
+                    tracked_count,
+                    weak_angle,
                 )
-            log.info(
-                "Shot %s source_type=ball_weak | reason=low_confidence_but_used | ball_pts_raw=%s ball_pts_tracked=%s final_angle=%.2f",
-                shot_id,
-                raw_count,
-                tracked_count,
-                weak_angle,
-            )
-            return {
-                "angle": round(weak_angle, 2),
-                "regression_angle": round(float(fit.get("angle", weak_angle)), 2),
-                "confidence": "low",
-                "confidence_score": 0.35,
-                "source": "ball_weak",
-                "ball_detections": tracked_count,
-                "ball_pts_raw": raw_count,
-                "ball_pts_tracked": tracked_count,
-                "kalman_used": True,
-                "inlier_ratio": round(float(track_stats["used_detections"] / max(1.0, float(track_stats["total_candidates"]))), 3),
-                "residual_error": round(float(fit.get("residual_norm", 1.0)), 3),
-                "angle_stability": round(float(fit.get("angle_stability", 0.0)), 3),
-                "gating_rejections": int(track_stats["gating_rejections"]),
-                "raw_points": raw_points,
-                "filtered_points": filtered_points,
-                "debug_image": debug_path,
-                "skip_wagon_wheel": False,
-            }
+                return {
+                    "angle": round(weak_angle, 2),
+                    "regression_angle": round(float(fit.get("angle", weak_angle)), 2),
+                    "confidence": "low",
+                    "confidence_score": 0.35,
+                    "source": "ball_weak",
+                    "ball_detections": tracked_count,
+                    "ball_pts_raw": raw_count,
+                    "ball_pts_tracked": tracked_count,
+                    "kalman_used": True,
+                    "inlier_ratio": round(float(track_stats["used_detections"] / max(1.0, float(track_stats["total_candidates"]))), 3),
+                    "residual_error": round(float(fit.get("residual_norm", 1.0)), 3),
+                    "angle_stability": round(float(fit.get("angle_stability", 0.0)), 3),
+                    "gating_rejections": int(track_stats["gating_rejections"]),
+                    "raw_points": raw_points,
+                    "filtered_points": filtered_points,
+                    "debug_image": debug_path,
+                    "skip_wagon_wheel": False,
+                }
 
         bat_angle, wrist_pt, bat_tip_pt = self._fallback_bat_angle(window_frames, refined_impact_idx)
         if bat_angle is not None:
-            if self.prev_output_angle is not None:
-                bat_angle = 0.7 * bat_angle + 0.3 * float(self.prev_output_angle)
-            self.prev_output_angle = float(bat_angle)
+            bat_angle = self._apply_angle_smoothing(bat_angle, max_diff_for_smooth=40.0)
             tracked_count = len(smoothed_points)
             raw_count = len([p for p in raw_points if p is not None])
             debug_path = ""
@@ -955,8 +969,8 @@ class BallTracker:
         raw_count = len([p for p in raw_points if p is not None])
         fallback_angle = 0.0
         if self.prev_output_angle is not None:
-            fallback_angle = 0.3 * float(self.prev_output_angle)
-        self.prev_output_angle = float(fallback_angle)
+            fallback_angle = float(self.prev_output_angle)
+        fallback_angle = self._apply_angle_smoothing(fallback_angle, max_diff_for_smooth=40.0)
         log.info(
             "Shot %s source_type=fallback | reason=no_direction | ball_pts_raw=%s ball_pts_tracked=%s kalman_used=%s final_angle=%.2f confidence_score=%.3f",
             shot_id,
