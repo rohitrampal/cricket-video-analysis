@@ -31,10 +31,11 @@ class BallTracker:
             except Exception as e:  # pragma: no cover
                 log.warning("BallTracker YOLO unavailable, using HSV fallback: %s", e)
         self.min_post_impact_points = 4
-        self.max_track_jump_px = 95.0
+        self.max_track_jump_px = 600.0
         self.max_missing_frames = 3
         self.expected_post_impact_points = 6
-        self.mahalanobis_gate_chi2 = 11.0
+        self.mahalanobis_gate_chi2 = 25.0
+        self.noise_continuity_px = 150.0
 
     @staticmethod
     def _point_angle(p1: tuple[float, float], p2: tuple[float, float]) -> float:
@@ -500,14 +501,16 @@ class BallTracker:
                 scored.sort(key=lambda x: x[0])
                 best_d2, bx, by, best = scored[0]
                 dist = float(np.linalg.norm(np.array([bx, by], dtype=np.float32) - np.array([pred_state[0], pred_state[1]], dtype=np.float32)))
-                if best_d2 <= self.mahalanobis_gate_chi2 and dist <= self.max_track_jump_px:
+                continuity_jump = dist > self.noise_continuity_px
+                if best_d2 <= self.mahalanobis_gate_chi2 and dist <= self.max_track_jump_px and (not continuity_jump):
                     chosen = (best, bx, by)
                     for _, _, _, other in scored[1:]:
                         rejected.append({**other, "reason": "not_nearest"})
                 else:
                     gating_rejections += len(scored)
+                    reason = "tracking_jump" if continuity_jump else "jump"
                     for _, _, _, cand in scored:
-                        rejected.append({**cand, "reason": "jump"})
+                        rejected.append({**cand, "reason": reason})
 
             if chosen is not None:
                 det, mx, my = chosen
@@ -668,7 +671,12 @@ class BallTracker:
                 camera_motion=camera_motion,
                 conf_min=0.2,
             )
+        if rejected:
+            jump_rej = sum(1 for r in rejected if r.get("reason") in ("jump", "tracking_jump"))
+            if jump_rej > 0:
+                log.info("Shot %s rejection_reason=tracking_jump count=%s", shot_id, jump_rej)
         refined_impact_idx = self._refine_impact_frame(detections, window_frames, impact_frame_idx)
+        refined_impact_idx = max(window_start, refined_impact_idx - 1)
         det_sorted = sorted(detections, key=lambda d: int(d["frame_index"]))
         last_valid_idx = int(det_sorted[-1]["frame_index"]) if det_sorted else refined_impact_idx
         post_start_idx = refined_impact_idx + 2  # skip impact and immediate unstable frame
@@ -680,6 +688,17 @@ class BallTracker:
         filtered_points = [d["ball_center"] for d in post]  # compensated coordinates
         filtered_screen_points = [d.get("screen_center", d["ball_center"]) for d in post]
         post_idx = [int(d["frame_index"]) for d in post]
+        if len(filtered_points) < 2:
+            refined_impact_idx = max(window_start, refined_impact_idx - 1)
+            post_start_idx = refined_impact_idx + 2
+            post_end_idx = min(refined_impact_idx + 10, last_valid_idx)
+            post = [
+                d for d in det_sorted
+                if post_start_idx <= int(d["frame_index"]) <= post_end_idx
+            ]
+            filtered_points = [d["ball_center"] for d in post]
+            filtered_screen_points = [d.get("screen_center", d["ball_center"]) for d in post]
+            post_idx = [int(d["frame_index"]) for d in post]
         smoothed_points = self._smooth_points(filtered_points, window=3)
         smoothed_screen_points = self._smooth_points(filtered_screen_points, window=3)
 
@@ -819,6 +838,53 @@ class BallTracker:
                 "debug_image": debug_path,
                 "skip_wagon_wheel": confidence_score < 0.4,
             }
+        # Weak trajectory fallback: keep approximate ball direction when >=2 points.
+        if len(smoothed_screen_points) >= 2:
+            p1 = smoothed_screen_points[0]
+            p2 = smoothed_screen_points[-1]
+            weak_angle = self._point_angle(p1, p2)
+            tracked_count = len(smoothed_points)
+            raw_count = len([p for p in raw_points if p is not None])
+            debug_path = ""
+            if impact_frame is not None:
+                debug_path = self._save_debug_overlay(
+                    impact_frame,
+                    trajectory=smoothed_screen_points,
+                    kalman_path=kalman_path,
+                    rejected_points=[tuple(r["ball_center"]) for r in rejected],
+                    regression_line=fit.get("regression_line") if bool(fit.get("ok", False)) else None,
+                    final_source="ball",
+                    final_vector=(p1, p2),
+                    shot_id=shot_id,
+                    frame_index=refined_impact_idx,
+                    video_stem=video_stem,
+                )
+            log.info(
+                "Shot %s rejection_reason=low_confidence_but_used | ball_pts_raw=%s ball_pts_tracked=%s final_angle=%.2f source=ball",
+                shot_id,
+                raw_count,
+                tracked_count,
+                weak_angle,
+            )
+            return {
+                "angle": round(weak_angle, 2),
+                "regression_angle": round(float(fit.get("angle", weak_angle)), 2),
+                "confidence": "low",
+                "confidence_score": 0.35,
+                "source": "ball",
+                "ball_detections": tracked_count,
+                "ball_pts_raw": raw_count,
+                "ball_pts_tracked": tracked_count,
+                "kalman_used": True,
+                "inlier_ratio": round(float(track_stats["used_detections"] / max(1.0, float(track_stats["total_candidates"]))), 3),
+                "residual_error": round(float(fit.get("residual_norm", 1.0)), 3),
+                "angle_stability": round(float(fit.get("angle_stability", 0.0)), 3),
+                "gating_rejections": int(track_stats["gating_rejections"]),
+                "raw_points": raw_points,
+                "filtered_points": filtered_points,
+                "debug_image": debug_path,
+                "skip_wagon_wheel": False,
+            }
 
         bat_angle, wrist_pt, bat_tip_pt = self._fallback_bat_angle(window_frames, refined_impact_idx)
         if bat_angle is not None:
@@ -848,6 +914,7 @@ class BallTracker:
                 bat_angle,
                 0.2,
             )
+            log.info("Shot %s rejection_reason=insufficient_points", shot_id)
             log.info(
                 "Shot %s trajectory | raw=%s filtered=%s",
                 shot_id,
@@ -870,7 +937,7 @@ class BallTracker:
                 "raw_points": raw_points,
                 "filtered_points": filtered_points,
                 "debug_image": debug_path,
-                "skip_wagon_wheel": True,
+                "skip_wagon_wheel": False,
             }
 
         tracked_count = len(smoothed_points)
@@ -885,6 +952,7 @@ class BallTracker:
             0.0,
             0.0,
         )
+        log.info("Shot %s rejection_reason=insufficient_points", shot_id)
         log.info(
             "Shot %s trajectory | raw=%s filtered=%s",
             shot_id,

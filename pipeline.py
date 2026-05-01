@@ -134,12 +134,13 @@ def process_video(video_path: str,
         enriched = analyze_shot(raw, runs=runs,
                                 batsman_facing=batsman_facing)
         low_conf = float(raw.get("direction_confidence_score", 0.0)) < 0.4
-        if low_conf:
+        is_bat_fallback = raw.get("direction_source") == "bat"
+        if low_conf and not is_bat_fallback:
             enriched["field_zone"] = "Unknown"
             enriched["shot_type"] = "Unknown"
         enriched["direction_confidence_score"] = float(raw.get("direction_confidence_score", 0.0))
         enriched["direction_source"] = raw.get("direction_source", "discard")
-        enriched["include_in_wagon_wheel"] = bool(raw.get("include_in_wagon_wheel", True)) and not low_conf
+        enriched["include_in_wagon_wheel"] = bool(raw.get("include_in_wagon_wheel", True)) and (is_bat_fallback or not low_conf)
         analyzed_shots.append(enriched)
         confidence = float(enriched.get("confidence_score", 0.0))
         print(f"   {enriched['shot_id']} | {enriched['angle_deg']:.1f} | "
