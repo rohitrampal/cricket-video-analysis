@@ -22,6 +22,7 @@ from extractor   import extract_frames, get_video_metadata
 from detector    import ShotDetector
 from shot_analyzer import analyze_shot, summarize_innings
 from renderer    import draw_wagon_wheel
+from ball_tracker import BallTracker
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +85,28 @@ def process_video(video_path: str,
     print(f"   ✅ {len(raw_shots)} shots detected")
 
     # ── Step 3: Analyze shots ─────────────────────────────
-    print("\n[3/4] Analyzing shot directions...")
+    print("\n[3/4] Estimating ball-based directions...")
+    tracker = BallTracker(debug_dir="output/ball_debug")
+    for raw in raw_shots:
+        direction = tracker.estimate_shot_direction(
+            frames=frames,
+            impact_frame_idx=int(raw["frame_idx"]),
+            shot_id=int(raw["shot_id"]),
+            video_stem=video_path.stem,
+        )
+        raw["raw_angle_deg"] = float(direction["angle"])
+        raw["direction_source"] = direction["source"]
+        raw["direction_confidence"] = direction["confidence"]
+        raw["ball_detections"] = int(direction["ball_detections"])
+        raw["ball_debug_image"] = direction["debug_image"]
+        print(
+            f"   Shot {raw['shot_id']:>2} | impact {raw['frame_idx']:>5} | "
+            f"ball_pts {raw['ball_detections']:>2} | angle {raw['raw_angle_deg']:>7.1f}° | "
+            f"source {raw['direction_source']:<4} | conf {raw['direction_confidence']}"
+        )
+    tracker.close()
+
+    print("\n[4/4] Analyzing shot directions...")
     analyzed_shots = []
 
     for raw in raw_shots:
@@ -101,7 +123,7 @@ def process_video(video_path: str,
               f"{enriched['shot_type']}")
 
     # ── Step 4: Render wagon wheel ────────────────────────
-    print("\n[4/4] Rendering wagon wheel...")
+    print("\n[5/5] Rendering wagon wheel...")
     summary   = summarize_innings(analyzed_shots)
     wheel_path = draw_wagon_wheel(
         shots        = analyzed_shots,

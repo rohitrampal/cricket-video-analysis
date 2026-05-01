@@ -61,7 +61,8 @@ def classify_shot_type(angle_deg: float, length: float) -> str:
 
 def analyze_shot(raw_shot: dict, runs: int = 0,
                  batsman_facing: str = "right") -> dict:
-    angle   = normalize_angle(raw_shot["raw_angle_deg"], batsman_facing)
+    direction_angle = raw_shot.get("ball_angle_deg", raw_shot["raw_angle_deg"])
+    angle   = normalize_angle(direction_angle, batsman_facing)
     zone    = get_field_zone(angle)
     length  = estimate_shot_length(raw_shot["bat_vector"])
     s_type  = classify_shot_type(angle, length)
