@@ -161,7 +161,12 @@ class BallTracker:
                 prev_gray = gray
                 prev_pts = None
                 continue
-            flow = good_next - good_prev
+            flow = np.asarray(good_next - good_prev, dtype=np.float32).reshape(-1, 2)
+            if flow.shape[0] == 0:
+                motion[idx] = (cum_dx, cum_dy)
+                prev_gray = gray
+                prev_pts = None
+                continue
             dx = float(np.median(flow[:, 0]))
             dy = float(np.median(flow[:, 1]))
             cum_dx += dx
