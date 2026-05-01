@@ -634,14 +634,7 @@ class MotionShotDetector:
         velocity_peak = float(np.max(velocities)) if len(velocities) > 0 else 0.0
         velocity_variance = float(np.var(velocities)) if len(velocities) > 1 else 0.0
 
-        # Lightweight aerial correction: when high-length shots have sign mismatch
-        # between angle and post-impact lateral motion, trust post-impact direction.
-        shot_length_proxy = float(np.clip(total_dist / 60.0, 0.35, 1.0))
-        if shot_length_proxy > 0.75:
-            lateral_dx = float(end[0] - start[0])
-            if (raw_angle > 0.0 and lateral_dx < 0.0) or (raw_angle < 0.0 and lateral_dx > 0.0):
-                raw_angle = -raw_angle
-                raw_angle = self._wrap_angle_deg(raw_angle)
+        # Keep detector angle sign stable; handedness/sign normalization is centralized.
 
         self.shots_detected  += 1
         self.last_shot_frame  = end_frame_idx

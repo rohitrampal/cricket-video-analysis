@@ -20,7 +20,7 @@ from config      import (VIDEOS_DIR, JSON_DIR, BATCH_MODE,
                           MIN_SHOT_GAP_FRAMES)
 from extractor   import extract_frames, get_video_metadata
 from detector    import ShotDetector
-from shot_analyzer import analyze_shot, summarize_innings
+from shot_analyzer import analyze_shot, summarize_innings, smooth_shot_classes_temporal
 from renderer    import draw_wagon_wheel
 from ball_tracker import BallTracker
 
@@ -97,12 +97,32 @@ def process_video(video_path: str,
         raw["raw_angle_deg"] = float(direction["angle"])
         raw["direction_source"] = direction["source"]
         raw["direction_confidence"] = direction["confidence"]
+        raw["direction_confidence_score"] = float(direction.get("confidence_score", 0.0))
         raw["ball_detections"] = int(direction["ball_detections"])
+        raw["ball_pts_raw"] = int(direction.get("ball_pts_raw", raw["ball_detections"]))
+        raw["ball_pts_tracked"] = int(direction.get("ball_pts_tracked", raw["ball_detections"]))
+        raw["kalman_used"] = bool(direction.get("kalman_used", False))
+        raw["regression_angle"] = direction.get("regression_angle")
+        raw["inlier_ratio"] = float(direction.get("inlier_ratio", 0.0))
+        raw["residual_error"] = float(direction.get("residual_error", 1.0))
+        raw["angle_stability"] = float(direction.get("angle_stability", 0.0))
+        raw["gating_rejections"] = int(direction.get("gating_rejections", 0))
+        raw["ball_raw_points"] = direction.get("raw_points", [])
+        raw["ball_filtered_points"] = direction.get("filtered_points", [])
+        raw["include_in_wagon_wheel"] = not bool(direction.get("skip_wagon_wheel", False))
         raw["ball_debug_image"] = direction["debug_image"]
         print(
             f"   Shot {raw['shot_id']:>2} | impact {raw['frame_idx']:>5} | "
-            f"ball_pts {raw['ball_detections']:>2} | angle {raw['raw_angle_deg']:>7.1f}° | "
-            f"source {raw['direction_source']:<4} | conf {raw['direction_confidence']}"
+            f"ball_pts_raw {raw['ball_pts_raw']:>2} | ball_pts_tracked {raw['ball_pts_tracked']:>2} | "
+            f"angle {raw['raw_angle_deg']:>7.1f}° | "
+            f"source {raw['direction_source']:<7} | conf {raw['direction_confidence']} ({raw['direction_confidence_score']:.2f})"
+        )
+        print(
+            f"      kalman={raw['kalman_used']} | regression_angle={raw['regression_angle']} | "
+            f"inlier_ratio={raw['inlier_ratio']:.2f} | residual_error={raw['residual_error']:.3f} | "
+            f"angle_stability={raw['angle_stability']:.2f} | gating_rej={raw['gating_rejections']} | "
+            f"raw={raw['ball_raw_points']} | "
+            f"filtered={raw['ball_filtered_points']}"
         )
     tracker.close()
 
@@ -113,6 +133,13 @@ def process_video(video_path: str,
         runs    = runs_map.get(raw["shot_id"], 0)
         enriched = analyze_shot(raw, runs=runs,
                                 batsman_facing=batsman_facing)
+        low_conf = float(raw.get("direction_confidence_score", 0.0)) < 0.4
+        if low_conf:
+            enriched["field_zone"] = "Unknown"
+            enriched["shot_type"] = "Unknown"
+        enriched["direction_confidence_score"] = float(raw.get("direction_confidence_score", 0.0))
+        enriched["direction_source"] = raw.get("direction_source", "discard")
+        enriched["include_in_wagon_wheel"] = bool(raw.get("include_in_wagon_wheel", True)) and not low_conf
         analyzed_shots.append(enriched)
         confidence = float(enriched.get("confidence_score", 0.0))
         print(f"   {enriched['shot_id']} | {enriched['angle_deg']:.1f} | "
@@ -120,13 +147,24 @@ def process_video(video_path: str,
         print(f"   Shot {enriched['shot_id']:>2} | "
               f"{enriched['field_zone']:<12} | "
               f"{enriched['angle_deg']:>7.1f}° | "
-              f"{enriched['shot_type']}")
+              f"{enriched['shot_type']} | "
+              f"traj={enriched.get('trajectory_type', 'unknown')} | "
+              f"lofted={enriched.get('lofted', False)} | "
+              f"height={float(enriched.get('height_score', 0.0)):.2f}")
+        print(
+            f"      window={enriched.get('chosen_window', 'full')} | "
+            f"roi_scale={float(enriched.get('roi_scale', 0.0)):.1f} | "
+            f"res_th={float(enriched.get('dynamic_residual_threshold', 0.0)):.2f}"
+        )
+
+    analyzed_shots = smooth_shot_classes_temporal(analyzed_shots)
 
     # ── Step 4: Render wagon wheel ────────────────────────
     print("\n[5/5] Rendering wagon wheel...")
-    summary   = summarize_innings(analyzed_shots)
+    reliable_shots = [s for s in analyzed_shots if bool(s.get("include_in_wagon_wheel", True))]
+    summary   = summarize_innings(reliable_shots)
     wheel_path = draw_wagon_wheel(
-        shots        = analyzed_shots,
+        shots        = reliable_shots,
         video_name   = video_path.name,
         summary      = summary,
         batsman_name = batsman_name
