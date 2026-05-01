@@ -36,6 +36,7 @@ class BallTracker:
         self.expected_post_impact_points = 6
         self.mahalanobis_gate_chi2 = 11.0
 
+    @staticmethod
     def _point_angle(p1: tuple[float, float], p2: tuple[float, float]) -> float:
         dx = float(p2[0] - p1[0])
         dy = float(p2[1] - p1[1])  # image-space dy; inversion handled centrally
