@@ -1,0 +1,8 @@
+[
+  {"video": "test1.mp4", "shot_id": 1, "zone": "Cover", "shot_height": "Ground"},
+  {"video": "test1.mp4", "shot_id": 2, "zone": "Long Off", "shot_height": "Ground"},
+  {"video": "test1.mp4", "shot_id": 3, "zone": "Straight", "shot_height": "Ground"},
+  {"video": "test2.mp4", "shot_id": 1, "zone": "Long Off", "shot_height": "Ground"},
+  {"video": "test3.mp4", "shot_id": 1, "zone": "Long Off", "shot_height": "Ground"},
+  {"video": "test4.mp4", "shot_id": 1, "zone": "Long Off", "shot_height": "Air"}
+]

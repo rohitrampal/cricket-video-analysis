@@ -6,6 +6,29 @@ import numpy as np
 
 from detector import PoseDetector
 from angle_utils import normalize_cricket_angle
+from config import (
+    _yolo_hub_weight_ref,
+    BALL_ROI_ENABLED,
+    BALL_ROI_EXCLUDE_TOP_FRAC,
+    BALL_ROI_FALLBACK_X0,
+    BALL_ROI_FALLBACK_X1,
+    BALL_ROI_FALLBACK_Y0,
+    BALL_ROI_FALLBACK_Y1,
+    BALL_ROI_INTERSECT_FALLBACK,
+    BALL_ROI_KEYPOINT_MIN_VIS,
+    BALL_ROI_MIN_HEIGHT_FRAC,
+    BALL_ROI_MIN_WIDTH_FRAC,
+    BALL_ROI_POSE_MARGIN_FRAC,
+    BALL_YOLO_COHERENCE_PX,
+    BALL_YOLO_CONF,
+    BALL_YOLO_IMGSZ,
+    BALL_YOLO_INIT_SINGLE_CONF,
+    BALL_YOLO_IOU,
+    BALL_YOLO_PRED_GATE_PX,
+    BALL_YOLO_RUN_STRIDE,
+    BALL_YOLO_STRONG_CONF,
+    DEVICE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -13,23 +36,48 @@ log = logging.getLogger(__name__)
 class BallTracker:
     """
     Ball-first direction estimator around detected shot impact frame.
-    - Preferred detector: YOLO (if ultralytics is installed + model path provided)
-    - Fallback detector: HSV + contour (white-ball heuristic)
+    Hybrid sensing: YOLO on a frame stride with strong / temporal / prediction gates,
+    HSV heuristic when YOLO is not trusted, Kalman coasts on prediction when gates fail.
     """
 
-    def __init__(self, debug_dir: str | Path = "output/ball_debug", yolo_model_path: str | None = None):
+    def __init__(
+        self,
+        debug_dir: str | Path = "output/ball_debug",
+        yolo_model_path: str | None = None,
+        yolo_conf: float | None = None,
+        yolo_iou: float | None = None,
+        yolo_imgsz: int | None = None,
+        yolo_device: str | None = None,
+    ):
         self.debug_dir = Path(debug_dir)
         self.debug_dir.mkdir(parents=True, exist_ok=True)
 
         self.pose = PoseDetector()
         self.yolo = None
-        if yolo_model_path:
-            try:
-                from ultralytics import YOLO  # optional dependency
-                self.yolo = YOLO(yolo_model_path)
-                log.info("BallTracker YOLO loaded: %s", yolo_model_path)
-            except Exception as e:  # pragma: no cover
-                log.warning("BallTracker YOLO unavailable, using HSV fallback: %s", e)
+        self.yolo_weights_path: str | None = None
+        self.yolo_conf = float(BALL_YOLO_CONF if yolo_conf is None else yolo_conf)
+        self.yolo_iou = float(BALL_YOLO_IOU if yolo_iou is None else yolo_iou)
+        self.yolo_imgsz = int(BALL_YOLO_IMGSZ) if yolo_imgsz is None else int(yolo_imgsz)
+        self.yolo_device = str(DEVICE if yolo_device is None else yolo_device).strip() or "cpu"
+        if yolo_model_path and str(yolo_model_path).strip():
+            raw = str(yolo_model_path).strip()
+            exp = Path(raw).expanduser()
+            if exp.is_file():
+                weights = str(exp.resolve())
+            elif _yolo_hub_weight_ref(raw):
+                weights = raw
+            else:
+                log.warning("Ball YOLO weights not found (%s); using HSV fallback", exp)
+                weights = None
+            if weights is not None:
+                try:
+                    from ultralytics import YOLO  # optional dependency
+
+                    self.yolo = YOLO(weights)
+                    self.yolo_weights_path = weights
+                    log.info("BallTracker YOLO loaded: %s", weights)
+                except Exception as e:  # pragma: no cover
+                    log.warning("BallTracker YOLO unavailable, using HSV fallback: %s", e)
         self.min_post_impact_points = 4
         self.max_track_jump_px = 600.0
         self.max_missing_frames = 3
@@ -59,6 +107,111 @@ class BallTracker:
         dx = float(p2[0] - p1[0])
         dy = float(p2[1] - p1[1])  # image-space dy; inversion handled centrally
         return normalize_cricket_angle(dx=dx, dy=dy, batsman_facing="right")
+
+    @staticmethod
+    def _fallback_roi_xyxy(w: int, h: int) -> tuple[int, int, int, int]:
+        x0 = int(float(w) * float(BALL_ROI_FALLBACK_X0))
+        x1 = int(float(w) * float(BALL_ROI_FALLBACK_X1))
+        y0 = int(float(h) * float(BALL_ROI_FALLBACK_Y0))
+        y1 = int(float(h) * float(BALL_ROI_FALLBACK_Y1))
+        x0 = max(0, min(x0, w - 1))
+        x1 = max(x0 + 1, min(x1, w))
+        y0 = max(0, min(y0, h - 1))
+        y1 = max(y0 + 1, min(y1, h))
+        return x0, y0, x1, y1
+
+    def _pose_roi_xyxy(self, frame: np.ndarray) -> tuple[int, int, int, int] | None:
+        h, w = frame.shape[:2]
+        kp = self.pose.detect(frame)
+        if not kp:
+            return None
+        vis_min = float(BALL_ROI_KEYPOINT_MIN_VIS)
+        names = (
+            "left_wrist",
+            "right_wrist",
+            "left_elbow",
+            "right_elbow",
+            "left_shoulder",
+            "right_shoulder",
+            "left_hip",
+            "right_hip",
+            "left_knee",
+            "right_knee",
+            "nose",
+        )
+        xs: list[float] = []
+        ys: list[float] = []
+        for n in names:
+            if n not in kp:
+                continue
+            p = kp[n]
+            if float(p.get("visibility", 0.0)) < vis_min:
+                continue
+            xs.append(float(p["x"]))
+            ys.append(float(p["y"]))
+        if len(xs) < 2:
+            return None
+        min_x = min(xs)
+        max_x = max(xs)
+        min_y = min(ys)
+        max_y = max(ys)
+        margin = float(BALL_ROI_POSE_MARGIN_FRAC) * max(float(w), float(h))
+        x0 = int(min_x - margin)
+        y0 = int(min_y - margin)
+        x1 = int(max_x + margin)
+        y1 = int(max_y + margin)
+        min_w = max(1, int(float(w) * float(BALL_ROI_MIN_WIDTH_FRAC)))
+        min_h = max(1, int(float(h) * float(BALL_ROI_MIN_HEIGHT_FRAC)))
+        if x1 - x0 < min_w:
+            pad = (min_w - (x1 - x0)) // 2
+            x0 -= pad
+            x1 += pad
+        if y1 - y0 < min_h:
+            pad = (min_h - (y1 - y0)) // 2
+            y0 -= pad
+            y1 += pad
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        x1 = min(w - 1, x1)
+        y1 = min(h - 1, y1)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return x0, y0, x1, y1
+
+    def _finalize_roi_xyxy(
+        self,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        w: int,
+        h: int,
+    ) -> tuple[int, int, int, int]:
+        """Intersect with fallback band, then enforce hard sky strip on top edge."""
+        if BALL_ROI_INTERSECT_FALLBACK:
+            fx0, fy0, fx1, fy1 = self._fallback_roi_xyxy(w, h)
+            x0 = max(x0, fx0)
+            y0 = max(y0, fy0)
+            x1 = min(x1, fx1)
+            y1 = min(y1, fy1)
+        sky_y = int(float(h) * float(BALL_ROI_EXCLUDE_TOP_FRAC))
+        y0 = max(y0, sky_y)
+        x0 = max(0, min(x0, w - 1))
+        y0 = max(0, min(y0, h - 1))
+        x1 = max(x0 + 1, min(x1, w))
+        y1 = max(y0 + 1, min(y1, h))
+        return x0, y0, x1, y1
+
+    def _ball_roi_xyxy(self, frame: np.ndarray) -> tuple[int, int, int, int]:
+        h, w = frame.shape[:2]
+        if not BALL_ROI_ENABLED:
+            return 0, 0, max(0, w - 1), max(0, h - 1)
+        roi_pose = self._pose_roi_xyxy(frame)
+        if roi_pose is not None:
+            x0, y0, x1, y1 = roi_pose
+            return self._finalize_roi_xyxy(x0, y0, x1, y1, w, h)
+        x0, y0, x1, y1 = self._fallback_roi_xyxy(w, h)
+        return self._finalize_roi_xyxy(x0, y0, x1, y1, w, h)
 
     def _init_kalman(self, x: float, y: float) -> tuple[np.ndarray, np.ndarray]:
         # State: [x, y, vx, vy, ax, ay]
@@ -199,16 +352,29 @@ class BallTracker:
         if self.yolo is None:
             return []
         try:
-            result = self.yolo.predict(frame, verbose=False)[0]
+            rx0, ry0, rx1, ry1 = self._ball_roi_xyxy(frame)
+            pred_kw: dict = {
+                "verbose": False,
+                "conf": self.yolo_conf,
+                "iou": self.yolo_iou,
+                "device": self.yolo_device,
+            }
+            if self.yolo_imgsz and self.yolo_imgsz > 0:
+                pred_kw["imgsz"] = int(self.yolo_imgsz)
+            result = self.yolo.predict(frame, **pred_kw)[0]
             if result.boxes is None or len(result.boxes) == 0:
                 return []
             candidates: list[dict] = []
             for box in result.boxes:
                 conf = float(box.conf[0])
+                if conf < self.yolo_conf:
+                    continue
                 xyxy = box.xyxy[0].tolist()
                 x1, y1, x2, y2 = xyxy
                 cx = float((x1 + x2) / 2.0)
                 cy = float((y1 + y2) / 2.0)
+                if not (rx0 <= cx <= rx1 and ry0 <= cy <= ry1):
+                    continue
                 candidates.append(
                     {
                         "frame_index": frame_index,
@@ -220,12 +386,17 @@ class BallTracker:
         except Exception:
             return []
 
-    @staticmethod
-    def _detect_ball_hsv(frame: np.ndarray, frame_index: int) -> list[dict]:
+    def _detect_ball_hsv(self, frame: np.ndarray, frame_index: int) -> list[dict]:
+        h, w = frame.shape[:2]
+        rx0, ry0, rx1, ry1 = self._ball_roi_xyxy(frame)
+        roi_mask = np.zeros((h, w), dtype=np.uint8)
+        roi_mask[ry0 : ry1 + 1, rx0 : rx1 + 1] = 255
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         lower = np.array([0, 0, 180], dtype=np.uint8)
         upper = np.array([180, 70, 255], dtype=np.uint8)
         mask = cv2.inRange(hsv, lower, upper)
+        mask = cv2.bitwise_and(mask, roi_mask)
         mask = cv2.GaussianBlur(mask, (5, 5), 0)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
@@ -255,12 +426,6 @@ class BallTracker:
                 }
             )
         return sorted(candidates, key=lambda d: float(d["confidence"]), reverse=True)
-
-    def _detect_ball(self, frame: np.ndarray, frame_index: int) -> list[dict]:
-        det = self._detect_ball_yolo(frame, frame_index)
-        if det:
-            return det
-        return self._detect_ball_hsv(frame, frame_index)
 
     @staticmethod
     def _smooth_points(points: list[tuple[float, float]], window: int = 3) -> list[tuple[float, float]]:
@@ -459,8 +624,8 @@ class BallTracker:
         conf_min: float = 0.2,
     ) -> tuple[list[dict], list[dict], list[tuple[float, float]], list[tuple[float, float]], dict]:
         """
-        Track ball using Kalman predict/update and prediction-based association.
-        Returns accepted, rejected, raw_top, and full kalman path points.
+        Hybrid ball track: YOLO on a stride with strong/temporal/prediction gates; HSV fills
+        gaps; Kalman coasts on prediction when detections fail gates.
         """
         accepted: list[dict] = []
         rejected: list[dict] = []
@@ -472,14 +637,83 @@ class BallTracker:
         gating_rejections = 0
         total_candidates = 0
         used_detections = 0
+        yolo_inferences = 0
+        kalman_updates_yolo = 0
+        kalman_updates_hsv = 0
+        kalman_predict_only = 0
+        yolo_run_seq = -1
+        last_strong_yolo_run: tuple[int, float, float] | None = None
+        stride = max(1, int(BALL_YOLO_RUN_STRIDE))
 
-        for fd in sorted(window_frames, key=lambda x: int(x["frame_idx"])):
+        for i, fd in enumerate(sorted(window_frames, key=lambda x: int(x["frame_idx"]))):
             frame_idx = int(fd["frame_idx"])
             mdx, mdy = camera_motion.get(frame_idx, (0.0, 0.0))
-            candidates = [
-                c for c in self._detect_ball(fd["frame"], frame_idx)
-                if float(c["confidence"]) >= conf_min
-            ]
+            frame = fd["frame"]
+
+            pred_state: np.ndarray | None = None
+            pred_cov: np.ndarray | None = None
+            if state is not None:
+                pred_state, pred_cov = self._kalman_predict(state, cov, dt=1.0)
+
+            run_yolo = (self.yolo is not None) and (i % stride == 0)
+            yolo_dets: list[dict] = []
+            if run_yolo:
+                yolo_inferences += 1
+                yolo_run_seq += 1
+                yolo_dets = self._detect_ball_yolo(frame, frame_idx)
+
+            strong_yolo: dict | None = None
+            for d in yolo_dets:
+                if float(d["confidence"]) >= BALL_YOLO_STRONG_CONF:
+                    strong_yolo = d
+                    break
+
+            consec_pair = False
+            if strong_yolo is not None and run_yolo:
+                cx0, cy0 = strong_yolo["ball_center"]
+                bx_s = float(cx0 - mdx)
+                by_s = float(cy0 - mdy)
+                if last_strong_yolo_run is not None:
+                    prun, px, py = last_strong_yolo_run
+                    if yolo_run_seq == prun + 1 and float(np.hypot(bx_s - px, by_s - py)) <= BALL_YOLO_COHERENCE_PX:
+                        consec_pair = True
+
+            validated_yolo = False
+            if strong_yolo is not None:
+                cx0, cy0 = strong_yolo["ball_center"]
+                bx_s = float(cx0 - mdx)
+                by_s = float(cy0 - mdy)
+                near_pred = False
+                if pred_state is not None and pred_cov is not None:
+                    dist = float(np.hypot(bx_s - float(pred_state[0]), by_s - float(pred_state[1])))
+                    d2 = self._innovation_mahalanobis(pred_state, pred_cov, bx_s, by_s)
+                    near_pred = dist <= BALL_YOLO_PRED_GATE_PX or d2 <= self.mahalanobis_gate_chi2
+                if pred_state is not None:
+                    validated_yolo = near_pred or consec_pair
+                else:
+                    bootstrap = float(strong_yolo["confidence"]) >= BALL_YOLO_INIT_SINGLE_CONF
+                    validated_yolo = consec_pair or bootstrap
+
+            if run_yolo:
+                if strong_yolo is not None:
+                    cx0, cy0 = strong_yolo["ball_center"]
+                    last_strong_yolo_run = (yolo_run_seq, float(cx0 - mdx), float(cy0 - mdy))
+                else:
+                    last_strong_yolo_run = None
+
+            candidates: list[dict] = []
+            if validated_yolo and strong_yolo is not None:
+                yc = dict(strong_yolo)
+                yc["detect_source"] = "yolo"
+                candidates.append(yc)
+            else:
+                for c in self._detect_ball_hsv(frame, frame_idx):
+                    if float(c["confidence"]) < conf_min:
+                        continue
+                    hc = dict(c)
+                    hc["detect_source"] = "hsv"
+                    candidates.append(hc)
+
             total_candidates += len(candidates)
             if candidates:
                 raw_top_points.append(tuple(candidates[0]["ball_center"]))
@@ -492,6 +726,11 @@ class BallTracker:
                 x = float(x0 - mdx)
                 y = float(y0 - mdy)
                 state, cov = self._init_kalman(float(x), float(y))
+                src = str(first.get("detect_source", "hsv"))
+                if src == "yolo":
+                    kalman_updates_yolo += 1
+                else:
+                    kalman_updates_hsv += 1
                 accepted.append(
                     {
                         "frame_index": frame_idx,
@@ -499,13 +738,14 @@ class BallTracker:
                         "screen_center": (float(x + mdx), float(y + mdy)),
                         "confidence": float(first["confidence"]),
                         "kind": "detected",
+                        "detect_source": src,
                     }
                 )
                 used_detections += 1
                 kalman_path.append((float(state[0] + mdx), float(state[1] + mdy)))
                 continue
 
-            pred_state, pred_cov = self._kalman_predict(state, cov, dt=1.0)
+            assert pred_state is not None and pred_cov is not None
             chosen = None
             if candidates:
                 scored = []
@@ -517,7 +757,11 @@ class BallTracker:
                     scored.append((d2, ccomp_x, ccomp_y, cand))
                 scored.sort(key=lambda x: x[0])
                 best_d2, bx, by, best = scored[0]
-                dist = float(np.linalg.norm(np.array([bx, by], dtype=np.float32) - np.array([pred_state[0], pred_state[1]], dtype=np.float32)))
+                dist = float(
+                    np.linalg.norm(
+                        np.array([bx, by], dtype=np.float32) - np.array([pred_state[0], pred_state[1]], dtype=np.float32)
+                    )
+                )
                 continuity_jump = dist > self.noise_continuity_px
                 if best_d2 <= self.mahalanobis_gate_chi2 and dist <= self.max_track_jump_px and (not continuity_jump):
                     chosen = (best, bx, by)
@@ -532,6 +776,11 @@ class BallTracker:
             if chosen is not None:
                 det, mx, my = chosen
                 state, cov = self._kalman_update(pred_state, pred_cov, float(mx), float(my))
+                src = str(det.get("detect_source", "hsv"))
+                if src == "yolo":
+                    kalman_updates_yolo += 1
+                else:
+                    kalman_updates_hsv += 1
                 accepted.append(
                     {
                         "frame_index": frame_idx,
@@ -539,6 +788,7 @@ class BallTracker:
                         "screen_center": (float(state[0] + mdx), float(state[1] + mdy)),
                         "confidence": float(det["confidence"]),
                         "kind": "detected",
+                        "detect_source": src,
                     }
                 )
                 used_detections += 1
@@ -547,6 +797,7 @@ class BallTracker:
                 state, cov = pred_state, pred_cov
                 missing_streak += 1
                 if missing_streak <= self.max_missing_frames:
+                    kalman_predict_only += 1
                     accepted.append(
                         {
                             "frame_index": frame_idx,
@@ -554,6 +805,7 @@ class BallTracker:
                             "screen_center": (float(state[0] + mdx), float(state[1] + mdy)),
                             "confidence": 0.0,
                             "kind": "predicted",
+                            "detect_source": "predict",
                         }
                     )
                 else:
@@ -562,11 +814,26 @@ class BallTracker:
                     missing_streak = 0
                     continue
             kalman_path.append((float(state[0] + mdx), float(state[1] + mdy)))
+
         stats = {
             "gating_rejections": int(gating_rejections),
             "total_candidates": int(total_candidates),
             "used_detections": int(used_detections),
+            "yolo_inferences": int(yolo_inferences),
+            "kalman_updates_yolo": int(kalman_updates_yolo),
+            "kalman_updates_hsv": int(kalman_updates_hsv),
+            "kalman_predict_only": int(kalman_predict_only),
         }
+        log.info(
+            "Ball path hybrid | frames=%s yolo_inf=%s kalman_yolo=%s kalman_hsv=%s predict_only=%s candidates=%s used=%s",
+            len(window_frames),
+            yolo_inferences,
+            kalman_updates_yolo,
+            kalman_updates_hsv,
+            kalman_predict_only,
+            total_candidates,
+            used_detections,
+        )
         return accepted, rejected, raw_top_points, kalman_path, stats
 
     def _fallback_bat_angle(
@@ -600,6 +867,7 @@ class BallTracker:
             if norm < 1e-6:
                 continue
             unit = arm / norm
+            # Primary bat-axis estimate from shoulder -> wrist extension.
             bat_tip = wrist_pt + unit * (0.9 * norm)
             ang = self._point_angle(tuple(wrist_pt), tuple(bat_tip))
             sample_angles.append(float(ang))
@@ -610,6 +878,73 @@ class BallTracker:
         if mean_angle is None:
             return None, None, None
         return float(normalize_cricket_angle(np.sin(np.radians(mean_angle)), -np.cos(np.radians(mean_angle)), "right")), impact_wrist, impact_tip
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        return ((float(angle) + 180.0) % 360.0) - 180.0
+
+    def _motion_hint_from_points(self, points: list[tuple[float, float]]) -> float | None:
+        if len(points) < 2:
+            return None
+        arr = np.array(points, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            return None
+        deltas = np.diff(arr, axis=0)
+        if len(deltas) == 0:
+            return None
+        mags = np.linalg.norm(deltas, axis=1)
+        if len(mags) == 0:
+            return None
+        valid = mags >= 2.5
+        if not np.any(valid):
+            return None
+        deltas = deltas[valid]
+        if len(deltas) == 0:
+            return None
+        med_vec = np.median(deltas, axis=0)
+        med_mag = float(np.linalg.norm(med_vec))
+        if med_mag < 2.5:
+            return None
+        return float(self._point_angle((0.0, 0.0), (float(med_vec[0]), float(med_vec[1]))))
+
+    def _robust_points_hint_angle(
+        self,
+        filtered_screen_points: list[tuple[float, float]],
+        raw_points: list[tuple[float, float]],
+    ) -> float | None:
+        """
+        Estimate a coarse direction hint from sparse/noisy ball points.
+        Prefer filtered trajectory when it carries real motion; otherwise
+        fallback to raw detections (often more informative in low-track cases).
+        """
+        hint_filtered = self._motion_hint_from_points(list(filtered_screen_points))
+        if hint_filtered is not None:
+            return hint_filtered
+        return self._motion_hint_from_points(list(raw_points))
+
+    def _resolve_bat_fallback_angle(
+        self,
+        base_angle: float,
+        filtered_screen_points: list[tuple[float, float]],
+        raw_points: list[tuple[float, float]],
+    ) -> float:
+        """
+        Resolve 180° ambiguity in bat-axis fallback using robust cues:
+        1) sparse ball-motion hint from detected points
+        2) temporal continuity with previous output angle
+        """
+        cand_a = self._wrap_angle(base_angle)
+        cand_b = self._wrap_angle(base_angle + 180.0)
+        hint_angle = self._robust_points_hint_angle(filtered_screen_points, raw_points)
+        if hint_angle is not None:
+            da = self._wrap_angle_diff(cand_a, hint_angle)
+            db = self._wrap_angle_diff(cand_b, hint_angle)
+            return float(cand_a if da <= db else cand_b)
+        if self.prev_output_angle is not None:
+            da = self._wrap_angle_diff(cand_a, self.prev_output_angle)
+            db = self._wrap_angle_diff(cand_b, self.prev_output_angle)
+            return float(cand_a if da <= db else cand_b)
+        return float(cand_a)
 
     def _save_debug_overlay(
         self,
@@ -625,6 +960,19 @@ class BallTracker:
         video_stem: str,
     ) -> str:
         canvas = frame.copy()
+        if BALL_ROI_ENABLED:
+            rx0, ry0, rx1, ry1 = self._ball_roi_xyxy(frame)
+            cv2.rectangle(canvas, (rx0, ry0), (rx1, ry1), (0, 255, 0), 2)
+            cv2.putText(
+                canvas,
+                "ball ROI",
+                (rx0 + 4, max(ry0 + 18, 22)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
         if len(trajectory) >= 2:
             pts = np.array([[int(x), int(y)] for x, y in trajectory], dtype=np.int32)
             cv2.polylines(canvas, [pts], False, (0, 255, 255), 2)
@@ -680,7 +1028,15 @@ class BallTracker:
         rejected = []
         raw_points = []
         kalman_path = []
-        track_stats = {"gating_rejections": 0, "total_candidates": 0, "used_detections": 0}
+        track_stats = {
+            "gating_rejections": 0,
+            "total_candidates": 0,
+            "used_detections": 0,
+            "yolo_inferences": 0,
+            "kalman_updates_yolo": 0,
+            "kalman_updates_hsv": 0,
+            "kalman_predict_only": 0,
+        }
         camera_motion = self._estimate_global_motion(window_frames) if window_frames else {}
         if window_frames:
             detections, rejected, raw_points, kalman_path, track_stats = self._track_ball_path(
@@ -854,6 +1210,12 @@ class BallTracker:
                 "residual_error": round(float(fit["residual_norm"]), 3),
                 "angle_stability": round(float(fit.get("angle_stability", 0.0)), 3),
                 "gating_rejections": int(track_stats["gating_rejections"]),
+                "ball_hybrid_stats": {
+                    "yolo_inferences": int(track_stats.get("yolo_inferences", 0)),
+                    "kalman_updates_yolo": int(track_stats.get("kalman_updates_yolo", 0)),
+                    "kalman_updates_hsv": int(track_stats.get("kalman_updates_hsv", 0)),
+                    "kalman_predict_only": int(track_stats.get("kalman_predict_only", 0)),
+                },
                 "raw_points": raw_points,
                 "filtered_points": filtered_points,
                 "debug_image": debug_path,
@@ -914,6 +1276,11 @@ class BallTracker:
 
         bat_angle, wrist_pt, bat_tip_pt = self._fallback_bat_angle(window_frames, refined_impact_idx)
         if bat_angle is not None:
+            bat_angle = self._resolve_bat_fallback_angle(
+                base_angle=float(bat_angle),
+                filtered_screen_points=smoothed_screen_points,
+                raw_points=raw_points,
+            )
             bat_angle = self._apply_angle_smoothing(bat_angle, max_diff_for_smooth=40.0)
             tracked_count = len(smoothed_points)
             raw_count = len([p for p in raw_points if p is not None])

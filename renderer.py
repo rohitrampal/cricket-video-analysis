@@ -90,6 +90,31 @@ def draw_3d_field(ax, fig):
             path_effects=[pe.withStroke(linewidth=3, foreground="#000")])
 
 
+def draw_orientation_cues(ax):
+    # Batsman facing hint: up toward straight.
+    ax.annotate(
+        "",
+        xy=(0.0, 0.27),
+        xytext=(0.0, 0.08),
+        arrowprops=dict(arrowstyle="-|>", color="#f5f5f5", lw=1.7),
+        zorder=23,
+    )
+    ax.text(
+        0.05, 0.25, "Batsman facing",
+        color="#e6e6e6", fontsize=6.6,
+        ha="left", va="center", zorder=23,
+        path_effects=[pe.withStroke(linewidth=2.0, foreground="#111111")]
+    )
+
+    # Compact directional annotation.
+    ax.text(
+        0.0, 1.045, "Top = Straight Drive direction",
+        color="#d6d6d6", fontsize=6.2,
+        ha="center", va="bottom", zorder=23,
+        path_effects=[pe.withStroke(linewidth=2.0, foreground="#111111")]
+    )
+
+
 def draw_wagon_wheel(shots, video_name, summary,
                      batsman_name="Batsman") -> Path:
     fig = plt.figure(figsize=(10,11), facecolor="#0d0d0d")
@@ -100,6 +125,7 @@ def draw_wagon_wheel(shots, video_name, summary,
     ax.axis("off")
 
     draw_3d_field(ax, fig)
+    draw_orientation_cues(ax)
 
     for shot in shots:
         angle  = shot.get("angle_deg", 0)

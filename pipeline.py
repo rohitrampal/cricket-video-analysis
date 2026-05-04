@@ -4,6 +4,7 @@ Cricket Wagon Wheel Analysis Pipeline
 Usage:
     python pipeline.py --video videos/match1.mp4
     python pipeline.py --video videos/match1.mp4 --batsman "Virat Kohli" --facing right
+    python pipeline.py --video videos/match1.mp4 --yolo-model models/cricket_ball.pt
     python pipeline.py --all          ← process all videos in videos/
 
 Runs one video at a time (CPU safe).
@@ -17,12 +18,13 @@ import logging
 from pathlib import Path
 
 from config      import (VIDEOS_DIR, JSON_DIR, BATCH_MODE,
-                          MIN_SHOT_GAP_FRAMES)
+                          MIN_SHOT_GAP_FRAMES, resolve_ball_yolo_model_path)
 from extractor   import extract_frames, get_video_metadata
 from detector    import ShotDetector
 from shot_analyzer import analyze_shot, summarize_innings, smooth_shot_classes_temporal
 from renderer    import draw_wagon_wheel
 from ball_tracker import BallTracker
+from angle_calibration import AngleCalibrator
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +32,8 @@ log = logging.getLogger(__name__)
 def process_video(video_path: str,
                   batsman_name: str = "Batsman",
                   batsman_facing: str = "right",
-                  runs_map: dict = None) -> dict:
+                  runs_map: dict = None,
+                  yolo_weights: str | None = None) -> dict:
     """
     Full pipeline for one video.
 
@@ -40,6 +43,8 @@ def process_video(video_path: str,
         batsman_facing: 'right' or 'left' (which way batsman faces camera)
         runs_map:       optional dict {shot_id: runs} to assign run values
                         e.g. {1: 4, 2: 0, 3: 6}  — if None, all shots = 0
+        yolo_weights:   optional path to Ultralytics .pt weights; None uses
+                        config / env (see resolve_ball_yolo_model_path)
 
     Returns:
         result dict with shots, summary, output paths
@@ -51,9 +56,17 @@ def process_video(video_path: str,
     print(f"  Processing: {video_path.name}")
     print(f"  Batsman:    {batsman_name}")
     print(f"  Facing:     {batsman_facing}")
+    yolo_path = resolve_ball_yolo_model_path(
+        cli_override=yolo_weights if (yolo_weights and str(yolo_weights).strip()) else None
+    )
+    if yolo_path:
+        print(f"  Ball YOLO:  {yolo_path}")
+    else:
+        print("  Ball YOLO:  (off — HSV ball fallback)")
     print(f"{'='*55}")
 
     start_time = time.time()
+    calibrator = AngleCalibrator.load()
 
     # ── Step 1: Extract frames ────────────────────────────
     print("\n[1/4] Extracting frames...")
@@ -86,7 +99,7 @@ def process_video(video_path: str,
 
     # ── Step 3: Analyze shots ─────────────────────────────
     print("\n[3/4] Estimating ball-based directions...")
-    tracker = BallTracker(debug_dir="output/ball_debug")
+    tracker = BallTracker(debug_dir="output/ball_debug", yolo_model_path=yolo_path)
     for raw in raw_shots:
         direction = tracker.estimate_shot_direction(
             frames=frames,
@@ -128,11 +141,14 @@ def process_video(video_path: str,
 
     print("\n[4/4] Analyzing shot directions...")
     analyzed_shots = []
+    if calibrator.enabled:
+        print("   🎛️ Angle calibration: enabled")
 
     for raw in raw_shots:
         runs    = runs_map.get(raw["shot_id"], 0)
         enriched = analyze_shot(raw, runs=runs,
                                 batsman_facing=batsman_facing)
+        enriched = calibrator.apply_to_shot(enriched)
         enriched["direction_confidence_score"] = float(raw.get("direction_confidence_score", 0.0))
         enriched["direction_source"] = raw.get("direction_source", "discard")
         enriched["include_in_wagon_wheel"] = True
@@ -184,6 +200,7 @@ def process_video(video_path: str,
         "shots":        analyzed_shots,
         "summary":      summary,
         "wagon_wheel":  str(wheel_path),
+        "ball_detector": "yolo" if tracker.yolo is not None else "hsv",
     }
 
     json_path = JSON_DIR / f"{video_path.stem}_results.json"
@@ -204,7 +221,8 @@ def process_video(video_path: str,
 
 
 def process_all_videos(batsman_name: str = "Batsman",
-                       batsman_facing: str = "right") -> list[dict]:
+                       batsman_facing: str = "right",
+                       yolo_weights: str | None = None) -> list[dict]:
     """Process every video in the videos/ directory sequentially."""
     videos = list(VIDEOS_DIR.glob("*.mp4")) + \
              list(VIDEOS_DIR.glob("*.mov")) + \
@@ -224,7 +242,8 @@ def process_all_videos(batsman_name: str = "Batsman",
             r = process_video(
                 video_path     = str(v),
                 batsman_name   = batsman_name,
-                batsman_facing = batsman_facing
+                batsman_facing = batsman_facing,
+                yolo_weights   = yolo_weights,
             )
             results.append(r)
         except Exception as e:
@@ -249,21 +268,31 @@ if __name__ == "__main__":
     parser.add_argument("--facing",  type=str, default="right",
                         choices=["right", "left"],
                         help="Direction batsman faces on screen")
+    parser.add_argument(
+        "--yolo-model",
+        type=str,
+        default="",
+        help="Path to Ultralytics YOLO .pt for ball detection (overrides config / env)",
+    )
 
     args = parser.parse_args()
+    yolo_cli = args.yolo_model.strip() if getattr(args, "yolo_model", "") else ""
 
     if args.all:
         process_all_videos(
             batsman_name   = args.batsman,
-            batsman_facing = args.facing
+            batsman_facing = args.facing,
+            yolo_weights   = yolo_cli or None,
         )
     elif args.video:
         process_video(
             video_path     = args.video,
             batsman_name   = args.batsman,
-            batsman_facing = args.facing
+            batsman_facing = args.facing,
+            yolo_weights   = yolo_cli or None,
         )
     else:
         print("Usage:")
         print("  python pipeline.py --video videos/match1.mp4")
+        print("  python pipeline.py --video videos/match1.mp4 --yolo-model models/cricket_ball.pt")
         print("  python pipeline.py --all --batsman 'Player Name'")
