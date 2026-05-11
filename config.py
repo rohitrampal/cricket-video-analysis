@@ -67,6 +67,19 @@ BALL_YOLO_STRONG_CONF = 0.4        # treat as “strong” YOLO only at or above
 BALL_YOLO_PRED_GATE_PX = 72.0      # accept strong YOLO vs Kalman prediction (pixel distance, compensated)
 BALL_YOLO_COHERENCE_PX = 88.0     # accept YOLO if consecutive YOLO runs agree within this distance
 BALL_YOLO_INIT_SINGLE_CONF = 0.55  # without a second YOLO run, allow one-shot init if this confident
+BALL_YOLO_ALLOWED_CLASS_NAMES = ("sports ball", "ball", "cricket ball")
+
+# ─── Direction reliability gate (production safety) ───────
+# Shots failing this gate are marked Unknown and excluded from wagon wheel.
+DIRECTION_MIN_CONFIDENCE_SCORE = 0.45
+DIRECTION_MIN_INLIER_RATIO = 0.30
+DIRECTION_MAX_RESIDUAL_ERROR = 0.75
+DIRECTION_MIN_ANGLE_STABILITY = 0.35
+DIRECTION_MIN_TRACKED_POINTS = 5
+
+# ─── Bat fallback gate (when ball is unreliable) ──────────
+BAT_FALLBACK_MIN_CONFIDENCE_SCORE = 0.55
+BAT_FALLBACK_MIN_WRIST_SAMPLES = 10
 
 
 def _yolo_hub_weight_ref(raw: str) -> bool:

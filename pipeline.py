@@ -20,7 +20,7 @@ from pathlib import Path
 from config      import (VIDEOS_DIR, JSON_DIR, BATCH_MODE,
                           MIN_SHOT_GAP_FRAMES, resolve_ball_yolo_model_path)
 from extractor   import extract_frames, get_video_metadata
-from detector    import ShotDetector
+from detector    import ShotDetector, PoseDetector
 from shot_analyzer import analyze_shot, summarize_innings, smooth_shot_classes_temporal
 from renderer    import draw_wagon_wheel
 from ball_tracker import BallTracker
@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 def process_video(video_path: str,
                   batsman_name: str = "Batsman",
-                  batsman_facing: str = "right",
+                  batsman_facing: str = "auto",
                   runs_map: dict = None,
                   yolo_weights: str | None = None) -> dict:
     """
@@ -71,6 +71,29 @@ def process_video(video_path: str,
     # ── Step 1: Extract frames ────────────────────────────
     print("\n[1/4] Extracting frames...")
     frames = extract_frames(str(video_path))
+    if (batsman_facing or "auto").strip().lower() == "auto":
+        pose = PoseDetector()
+        facing_votes = []
+        try:
+            for fd in frames[: min(24, len(frames))]:
+                kp = pose.detect(fd["frame"])
+                if not kp:
+                    continue
+                nose_v = float(kp["nose"]["visibility"])
+                ls_v = float(kp["left_shoulder"]["visibility"])
+                rs_v = float(kp["right_shoulder"]["visibility"])
+                if nose_v < 0.25 or ls_v < 0.25 or rs_v < 0.25:
+                    continue
+                shoulder_mid_x = 0.5 * (float(kp["left_shoulder"]["x"]) + float(kp["right_shoulder"]["x"]))
+                nose_x = float(kp["nose"]["x"])
+                facing_votes.append(-1 if nose_x < shoulder_mid_x else 1)
+        finally:
+            pose.close()
+        if facing_votes:
+            batsman_facing = "left" if sum(facing_votes) < 0 else "right"
+        else:
+            batsman_facing = "right"
+        print(f"  Facing(auto): inferred {batsman_facing}")
 
     # ── Step 2: Detect shots ──────────────────────────────
     print("\n[2/4] Detecting shots...")
@@ -101,13 +124,15 @@ def process_video(video_path: str,
     print("\n[3/4] Estimating ball-based directions...")
     tracker = BallTracker(debug_dir="output/ball_debug", yolo_model_path=yolo_path)
     for raw in raw_shots:
+        # Preserve detector-driven bat angle as an independent cue.
+        raw["bat_angle_deg"] = float(raw.get("raw_angle_deg", 0.0))
         direction = tracker.estimate_shot_direction(
             frames=frames,
             impact_frame_idx=int(raw["frame_idx"]),
             shot_id=int(raw["shot_id"]),
             video_stem=video_path.stem,
         )
-        raw["raw_angle_deg"] = float(direction["angle"])
+        raw["ball_angle_deg"] = float(direction["angle"])
         raw["direction_source"] = direction["source"]
         raw["direction_confidence"] = direction["confidence"]
         raw["direction_confidence_score"] = float(direction.get("confidence_score", 0.0))
@@ -122,12 +147,12 @@ def process_video(video_path: str,
         raw["gating_rejections"] = int(direction.get("gating_rejections", 0))
         raw["ball_raw_points"] = direction.get("raw_points", [])
         raw["ball_filtered_points"] = direction.get("filtered_points", [])
-        raw["include_in_wagon_wheel"] = True
+        raw["include_in_wagon_wheel"] = bool(direction.get("include_in_wagon_wheel", True))
         raw["ball_debug_image"] = direction["debug_image"]
         print(
             f"   Shot {raw['shot_id']:>2} | impact {raw['frame_idx']:>5} | "
             f"ball_pts_raw {raw['ball_pts_raw']:>2} | ball_pts_tracked {raw['ball_pts_tracked']:>2} | "
-            f"angle {raw['raw_angle_deg']:>7.1f}° | "
+            f"angle {raw['ball_angle_deg']:>7.1f}° | "
             f"source {raw['direction_source']:<11} | conf {raw['direction_confidence']} ({raw['direction_confidence_score']:.2f})"
         )
         print(
@@ -151,7 +176,7 @@ def process_video(video_path: str,
         enriched = calibrator.apply_to_shot(enriched)
         enriched["direction_confidence_score"] = float(raw.get("direction_confidence_score", 0.0))
         enriched["direction_source"] = raw.get("direction_source", "discard")
-        enriched["include_in_wagon_wheel"] = True
+        enriched["include_in_wagon_wheel"] = bool(enriched.get("include_in_wagon_wheel", raw.get("include_in_wagon_wheel", True)))
         analyzed_shots.append(enriched)
         confidence = float(enriched.get("confidence_score", 0.0))
         print(f"   {enriched['shot_id']} | {enriched['angle_deg']:.1f} | "
@@ -174,13 +199,14 @@ def process_video(video_path: str,
     # ── Step 4: Render wagon wheel ────────────────────────
     print("\n[5/5] Rendering wagon wheel...")
     reliable_shots = [s for s in analyzed_shots if bool(s.get("include_in_wagon_wheel", True))]
-    if raw_shots and not reliable_shots and analyzed_shots:
-        reliable_shots = [analyzed_shots[-1]]
-        print("   ⚠️ No shots selected for render; forcing last detected shot.")
     summary   = summarize_innings(reliable_shots)
     reliability_counts = {"ball_strong": 0, "ball_weak": 0, "bat": 0, "fallback": 0}
     for s in analyzed_shots:
-        src = str(s.get("direction_source", "fallback"))
+        src = str(s.get("direction_source_selected", s.get("direction_source", "fallback")))
+        if src == "bat_fallback":
+            src = "bat"
+        elif src == "discard":
+            src = "fallback"
         if src in reliability_counts:
             reliability_counts[src] += 1
         else:
@@ -221,7 +247,7 @@ def process_video(video_path: str,
 
 
 def process_all_videos(batsman_name: str = "Batsman",
-                       batsman_facing: str = "right",
+                       batsman_facing: str = "auto",
                        yolo_weights: str | None = None) -> list[dict]:
     """Process every video in the videos/ directory sequentially."""
     videos = list(VIDEOS_DIR.glob("*.mp4")) + \
@@ -265,8 +291,8 @@ if __name__ == "__main__":
                         help="Process all videos in videos/ folder")
     parser.add_argument("--batsman", type=str, default="Batsman",
                         help="Batsman display name")
-    parser.add_argument("--facing",  type=str, default="right",
-                        choices=["right", "left"],
+    parser.add_argument("--facing",  type=str, default="auto",
+                        choices=["right", "left", "auto"],
                         help="Direction batsman faces on screen")
     parser.add_argument(
         "--yolo-model",

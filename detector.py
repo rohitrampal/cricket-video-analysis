@@ -4,6 +4,7 @@ import numpy as np
 import mediapipe as mp
 import logging
 from config import POSE_CONFIDENCE
+from angle_utils import normalize_cricket_angle
 try:
     from scipy.signal import savgol_filter
 except Exception:  # pragma: no cover - keep pipeline alive if scipy missing
@@ -89,7 +90,7 @@ class MotionShotDetector:
     VERTICAL_REJECT_MAGNITUDE = 0.12
     MIN_ARM_ANGLE_CHANGE = 15.0   # minimum arm-angle change to confirm shot
     MIN_WRIST_TRAVEL_PX = 15.0    # reject tiny wrist-travel windows
-    IMPACT_FORWARD_FRAMES = 4      # use post-impact direction (N in [3,5])
+    IMPACT_FORWARD_FRAMES = 2      # use immediate post-impact direction to reduce follow-through bias
     UNSTABLE_ANGLE_ABS_DEG = 110.0
 
     def __init__(self, debug_metrics: bool = False):
@@ -214,11 +215,10 @@ class MotionShotDetector:
         return ((angle + 180.0) % 360.0) - 180.0
 
     def _vector_to_angle_deg(self, vec: np.ndarray) -> float:
-        """Convert image-space vector to cricket angle with Y-axis correction."""
+        """Convert image-space vector to central cricket-angle convention."""
         dx = float(vec[0])
-        dy = -float(vec[1])  # invert image Y (OpenCV top-left origin)
-        angle = float(np.degrees(np.arctan2(dy, dx)))
-        return self._wrap_angle_deg(angle)
+        dy = float(vec[1])
+        return float(normalize_cricket_angle(dx=dx, dy=dy, batsman_facing="right"))
 
     def _detect_impact_idx(self, smooth_positions: np.ndarray, frame_indices: np.ndarray) -> tuple[int, np.ndarray]:
         """Detect impact via rise-then-drop velocity pattern (not absolute max)."""

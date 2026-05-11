@@ -27,6 +27,7 @@ from config import (
     BALL_YOLO_PRED_GATE_PX,
     BALL_YOLO_RUN_STRIDE,
     BALL_YOLO_STRONG_CONF,
+    BALL_YOLO_ALLOWED_CLASS_NAMES,
     DEVICE,
 )
 
@@ -78,6 +79,9 @@ class BallTracker:
                     log.info("BallTracker YOLO loaded: %s", weights)
                 except Exception as e:  # pragma: no cover
                     log.warning("BallTracker YOLO unavailable, using HSV fallback: %s", e)
+        self.yolo_allowed_class_ids: set[int] | None = None
+        if self.yolo is not None:
+            self.yolo_allowed_class_ids = self._resolve_allowed_class_ids()
         self.min_post_impact_points = 4
         self.max_track_jump_px = 600.0
         self.max_missing_frames = 3
@@ -85,6 +89,42 @@ class BallTracker:
         self.mahalanobis_gate_chi2 = 25.0
         self.noise_continuity_px = 150.0
         self.prev_output_angle: float | None = None
+
+    def _resolve_allowed_class_ids(self) -> set[int] | None:
+        """
+        Resolve allowed YOLO class IDs by fuzzy-matching configured class names.
+        Returns None if no class-name map is available or no matches are found,
+        which means "do not class-filter".
+        """
+        if self.yolo is None:
+            return None
+        try:
+            names = getattr(self.yolo, "names", None)
+            if names is None:
+                return None
+            if isinstance(names, list):
+                class_map = {int(i): str(n) for i, n in enumerate(names)}
+            elif isinstance(names, dict):
+                class_map = {int(i): str(n) for i, n in names.items()}
+            else:
+                return None
+            allow_tokens = [str(x).strip().lower() for x in BALL_YOLO_ALLOWED_CLASS_NAMES if str(x).strip()]
+            allowed = set()
+            for cls_id, cls_name in class_map.items():
+                normalized = cls_name.strip().lower()
+                if any(tok in normalized for tok in allow_tokens):
+                    allowed.add(int(cls_id))
+            if not allowed:
+                log.warning(
+                    "BallTracker YOLO class filter unresolved (allowed_names=%s); disabling class filter",
+                    BALL_YOLO_ALLOWED_CLASS_NAMES,
+                )
+                return None
+            log.info("BallTracker YOLO class filter active: ids=%s", sorted(allowed))
+            return allowed
+        except Exception as e:
+            log.warning("BallTracker class filtering unavailable: %s", e)
+            return None
 
     @staticmethod
     def _wrap_angle_diff(curr: float, prev: float) -> float:
@@ -369,6 +409,13 @@ class BallTracker:
                 conf = float(box.conf[0])
                 if conf < self.yolo_conf:
                     continue
+                if self.yolo_allowed_class_ids is not None:
+                    try:
+                        cls_id = int(box.cls[0])
+                    except Exception:
+                        continue
+                    if cls_id not in self.yolo_allowed_class_ids:
+                        continue
                 xyxy = box.xyxy[0].tolist()
                 x1, y1, x2, y2 = xyxy
                 cx = float((x1 + x2) / 2.0)
@@ -1156,6 +1203,58 @@ class BallTracker:
             if abs(angle) > 175 or float(fit.get("angle_stability", 0.0)) < 0.15:
                 conf_label = "low"
                 confidence_score = min(confidence_score, 0.35)
+            weak_ball_track = (
+                conf_label == "low"
+                and (
+                    inlier_ratio < 0.20
+                    or float(fit.get("angle_stability", 0.0)) < 0.20
+                    or float(fit.get("residual_norm", 1.0)) > 0.75
+                )
+            )
+            if weak_ball_track:
+                bat_angle, wrist_pt, bat_tip_pt = self._fallback_bat_angle(window_frames, refined_impact_idx)
+                if bat_angle is not None:
+                    bat_angle = self._resolve_bat_fallback_angle(
+                        base_angle=float(bat_angle),
+                        filtered_screen_points=smoothed_screen_points,
+                        raw_points=raw_points,
+                    )
+                    bat_angle = self._apply_angle_smoothing(bat_angle, max_diff_for_smooth=40.0)
+                    tracked_count = len(smoothed_points)
+                    raw_count = len([p for p in raw_points if p is not None])
+                    debug_path = ""
+                    if impact_frame is not None:
+                        debug_path = self._save_debug_overlay(
+                            impact_frame,
+                            trajectory=smoothed_screen_points,
+                            kalman_path=kalman_path,
+                            rejected_points=[tuple(r["ball_center"]) for r in rejected],
+                            regression_line=fit.get("regression_line"),
+                            final_source="bat",
+                            final_vector=((wrist_pt[0], wrist_pt[1]), (bat_tip_pt[0], bat_tip_pt[1])) if wrist_pt and bat_tip_pt else None,
+                            shot_id=shot_id,
+                            frame_index=refined_impact_idx,
+                            video_stem=video_stem,
+                        )
+                    return {
+                        "angle": round(bat_angle, 2),
+                        "regression_angle": round(float(fit["angle"]), 2),
+                        "confidence": "low",
+                        "confidence_score": round(max(0.25, min(0.5, confidence_score)), 3),
+                        "source": "bat",
+                        "ball_detections": tracked_count,
+                        "ball_pts_raw": raw_count,
+                        "ball_pts_tracked": tracked_count,
+                        "kalman_used": True,
+                        "inlier_ratio": round(inlier_ratio, 3),
+                        "residual_error": round(float(fit["residual_norm"]), 3),
+                        "angle_stability": round(float(fit.get("angle_stability", 0.0)), 3),
+                        "gating_rejections": int(track_stats["gating_rejections"]),
+                        "raw_points": raw_points,
+                        "filtered_points": filtered_points,
+                        "debug_image": debug_path,
+                        "skip_wagon_wheel": False,
+                    }
             angle = self._apply_angle_smoothing(angle, max_diff_for_smooth=40.0)
             debug_path = ""
             if impact_frame is not None:

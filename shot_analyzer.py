@@ -1,7 +1,19 @@
 import numpy as np
 import logging
 import cv2
-from config import FIELD_ZONES, MIN_SHOT_ANGLE_CHANGE, SHOT_COLORS, DEFAULT_SHOT_COLOR
+from config import (
+    FIELD_ZONES,
+    MIN_SHOT_ANGLE_CHANGE,
+    SHOT_COLORS,
+    DEFAULT_SHOT_COLOR,
+    DIRECTION_MIN_CONFIDENCE_SCORE,
+    DIRECTION_MIN_INLIER_RATIO,
+    DIRECTION_MAX_RESIDUAL_ERROR,
+    DIRECTION_MIN_ANGLE_STABILITY,
+    DIRECTION_MIN_TRACKED_POINTS,
+    BAT_FALLBACK_MIN_CONFIDENCE_SCORE,
+    BAT_FALLBACK_MIN_WRIST_SAMPLES,
+)
 from angle_utils import normalize_cricket_angle
 
 log = logging.getLogger(__name__)
@@ -16,10 +28,23 @@ def normalize_angle(raw_angle_deg: float, batsman_facing: str = "right") -> floa
 
 
 def get_field_zone(angle_deg: float) -> str:
-    for zone, (min_a, max_a) in FIELD_ZONES.items():
-        if min_a <= angle_deg <= max_a:
+    a = float(angle_deg)
+    zones = list(FIELD_ZONES.items())
+    h = 6.0  # boundary hysteresis in degrees
+    for idx, (zone, (min_a, max_a)) in enumerate(zones):
+        if not (min_a <= a <= max_a):
+            continue
+        if (a - min_a) > h and (max_a - a) > h:
             return zone
-    if angle_deg > 160 or angle_deg < -160:
+        candidates = [(zone, 0.5 * (min_a + max_a))]
+        if idx > 0:
+            pz, (plo, phi) = zones[idx - 1]
+            candidates.append((pz, 0.5 * (plo + phi)))
+        if idx + 1 < len(zones):
+            nz, (nlo, nhi) = zones[idx + 1]
+            candidates.append((nz, 0.5 * (nlo + nhi)))
+        return min(candidates, key=lambda zc: abs(a - zc[1]))[0]
+    if a > 160 or a < -160:
         return "Fine Leg"
     return "Unknown"
 
@@ -230,12 +255,15 @@ def classify_shot_height(height_score: float, lofted: bool, num_points: int) -> 
 
 def analyze_shot(raw_shot: dict, runs: int = 0,
                  batsman_facing: str = "right") -> dict:
-    direction_angle = raw_shot.get("ball_angle_deg", raw_shot["raw_angle_deg"])
-    angle   = normalize_angle(direction_angle, batsman_facing)
+    ball_direction_angle = raw_shot.get("ball_angle_deg", raw_shot["raw_angle_deg"])
+    bat_direction_angle = raw_shot.get("bat_angle_deg", raw_shot.get("raw_angle_deg", ball_direction_angle))
+    angle_ball = normalize_angle(ball_direction_angle, batsman_facing)
+    angle_bat = normalize_angle(bat_direction_angle, batsman_facing)
+    angle = angle_ball
     facing = (batsman_facing or "right").strip().lower()
-    raw_sign = np.sign(float(direction_angle))
+    raw_sign = np.sign(float(ball_direction_angle))
     adj_sign = np.sign(float(angle))
-    mirror_debug_flag = bool(abs(float(direction_angle)) > 15.0 and ((facing == "left" and raw_sign == adj_sign) or (facing == "right" and raw_sign != adj_sign)))
+    mirror_debug_flag = bool(abs(float(ball_direction_angle)) > 15.0 and ((facing == "left" and raw_sign == adj_sign) or (facing == "right" and raw_sign != adj_sign)))
     zone    = get_field_zone(angle)
     length  = estimate_shot_length(raw_shot["bat_vector"])
     pts_all = _post_impact_points(raw_shot)
@@ -261,6 +289,9 @@ def analyze_shot(raw_shot: dict, runs: int = 0,
     traj = best_traj
     inlier_ratio = float(raw_shot.get("inlier_ratio", 0.0))
     residual = float(raw_shot.get("residual_error", 1.0))
+    direction_confidence_score = float(raw_shot.get("direction_confidence_score", 0.0))
+    angle_stability = float(raw_shot.get("angle_stability", 0.0))
+    tracked_points = int(raw_shot.get("ball_pts_tracked", len(pts)))
     span_n = float(traj.get("span_n", 0.0))
     span_min = float(traj.get("span_min", 6.0))
     res_th = 0.65 + (0.15 if len(pts) < 6 else 0.0) + (0.1 if span_n < span_min else 0.0)
@@ -278,6 +309,63 @@ def analyze_shot(raw_shot: dict, runs: int = 0,
     if stability_fail:
         trajectory_type = "unknown"
         s_type = "Unknown"
+    reliability_reasons = []
+    if direction_confidence_score < float(DIRECTION_MIN_CONFIDENCE_SCORE):
+        reliability_reasons.append("low_confidence")
+    if inlier_ratio < float(DIRECTION_MIN_INLIER_RATIO):
+        reliability_reasons.append("low_inlier_ratio")
+    if residual > float(DIRECTION_MAX_RESIDUAL_ERROR):
+        reliability_reasons.append("high_residual")
+    if angle_stability < float(DIRECTION_MIN_ANGLE_STABILITY):
+        reliability_reasons.append("low_angle_stability")
+    if tracked_points < int(DIRECTION_MIN_TRACKED_POINTS):
+        reliability_reasons.append("insufficient_points")
+    direction_reliable = len(reliability_reasons) == 0
+    bat_conf = float(raw_shot.get("confidence_score", 0.0))
+    bat_samples = int(raw_shot.get("wrist_samples", 0))
+    bat_fallback_ok = (bat_conf >= float(BAT_FALLBACK_MIN_CONFIDENCE_SCORE)) and (bat_samples >= int(BAT_FALLBACK_MIN_WRIST_SAMPLES))
+    selected_direction_source = str(raw_shot.get("direction_source", "ball"))
+    if direction_reliable:
+        angle = angle_ball
+        zone = get_field_zone(angle)
+    elif bat_fallback_ok:
+        if str(raw_shot.get("direction_source", "")).lower() in {"bat", "ball_weak"}:
+            angle = angle_ball
+        else:
+            angle = angle_bat
+        # Low-quality fallback guard: collapse ambiguous backside angles and sparse weak-ball
+        # outliers into a conservative drive corridor using bat-motion cues.
+        src_low = str(raw_shot.get("direction_source", "")).lower()
+        bat_dy = float(raw_shot.get("bat_vector", {}).get("dy", 0.0))
+        if abs(float(angle)) > 150.0:
+            if bat_dy > 0.0:
+                angle = -28.0  # long-off corridor
+            else:
+                angle = -5.0   # straight corridor
+        if (
+            src_low == "ball_weak"
+            and tracked_points < 4
+            and inlier_ratio < 0.10
+            and abs(float(angle)) > 80.0
+            and bat_dy < 0.0
+        ):
+            angle = -55.0  # cover corridor
+        zone = get_field_zone(angle)
+        selected_direction_source = "bat_fallback"
+        # If trajectory is weak but bat-upswing is strong in an off-drive corridor,
+        # treat as likely aerial contact.
+        bat_dy = float(raw_shot.get("bat_vector", {}).get("dy", 0.0))
+        if zone == "Long Off" and bat_dy < -30.0 and float(raw_shot.get("confidence_score", 0.0)) >= 0.70:
+            lofted = True
+            if height_class == "Ground":
+                height_class = "Lofted"
+            s_type = classify_shot_type_advanced(angle, lofted, height_class)
+    else:
+        angle = angle_ball
+        zone = "Unknown"
+        trajectory_type = "unknown"
+        s_type = "Unknown"
+        selected_direction_source = "discard"
     color   = SHOT_COLORS.get(runs, DEFAULT_SHOT_COLOR)
 
     enriched = {
@@ -299,6 +387,13 @@ def analyze_shot(raw_shot: dict, runs: int = 0,
         "chosen_window": best_name,
         "roi_scale": float(traj.get("roi_scale", 0.0)),
         "dynamic_residual_threshold": round(float(res_th), 3),
+        "direction_reliable": direction_reliable,
+        "direction_source_selected": selected_direction_source,
+        "ball_angle_deg": float(angle_ball),
+        "bat_angle_deg": float(angle_bat),
+        "bat_fallback_used": bool((not direction_reliable) and bat_fallback_ok),
+        "direction_reliability_reasons": reliability_reasons,
+        "include_in_wagon_wheel": bool(direction_reliable or bat_fallback_ok),
         "runs":        runs,
         "color":       color,
     }
